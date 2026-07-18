@@ -169,11 +169,11 @@ class CanonicalizeCorpus(_Output):
                 )
 
         for source, tally in run.per_source.items():
-            print(f"{source}: {tally.summary()}")
+            _note(f"{source}: {tally.summary()}")
 
         # Re-scan the output: the invariant is only established if it is observed.
         report = _scan(written, self.jobs)
-        print()
+        _note()
         self.emit(report)
         raise SystemExit(exit_code(report, self.fail_on))
 
@@ -241,12 +241,38 @@ def _canonicalize_file(
     return target
 
 
+def _note(message: str = "") -> None:
+    """Commentary, which is never the report.
+
+    Stdout carries the report and nothing else, so `--json` stays machine-readable however much
+    a run has to say for itself. This used to go to stdout, where a single skipped file was
+    enough to make the JSON unparseable.
+    """
+    print(message, file=sys.stderr)
+
+
+def _step(message: str) -> None:
+    """Name a phase that runs long enough to look hung but cannot show a bar.
+
+    Terminal-only, the same policy the progress bar follows: a redirected run wants the
+    findings, not the narration.
+    """
+    if sys.stderr.isatty():
+        print(message, file=sys.stderr, flush=True)
+
+
 def _discover(paths: list[Path], jobs: int) -> Discovery:
-    """Expand paths to text files, reporting what was passed over."""
+    """Expand paths to text files, reporting what was passed over.
+
+    The walk opens and sniffs every candidate before a single line is scanned, which on a large
+    tree is silent time — hence the step, not a bar: `os.walk` cannot say how many files it is
+    about to find without walking twice.
+    """
+    _step("discovering files…")
     discovery = discover_text_files(paths, workers=jobs)
     note = summarize(discovery.skipped)
     if note:
-        print(note)
+        _note(note)
     return discovery
 
 
