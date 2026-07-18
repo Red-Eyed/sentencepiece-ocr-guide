@@ -118,6 +118,8 @@ pub struct Trainer {
     pub split_digits: bool,
     pub split_by_unicode_script: bool,
     pub max_piece_length: i32,
+    /// `max_sentence_length`: lines longer than this are dropped by the trainer, silently.
+    pub max_line_bytes: usize,
     pub character_coverage: f32,
     pub user_defined_symbols: Vec<String>,
 }
@@ -189,6 +191,7 @@ fn read_trainer(spec: &sentencepiece_model::TrainerSpec) -> Trainer {
         split_digits: spec.split_digits(),
         split_by_unicode_script: spec.split_by_unicode_script(),
         max_piece_length: spec.max_sentencepiece_length(),
+        max_line_bytes: spec.max_sentence_length().max(0) as usize,
         character_coverage: spec.character_coverage(),
         user_defined_symbols: spec.user_defined_symbols.clone(),
     }

@@ -7,7 +7,7 @@
 //! only for the samples.
 
 pub mod artifact;
+pub mod budget;
 pub mod config;
 pub mod pieces;
 pub mod suite;
-pub mod writing;

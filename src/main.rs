@@ -15,10 +15,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use spm_ocr::corpus::axis::default_axes;
+use spm_ocr::corpus::balance;
 use spm_ocr::corpus::canonical::Canonicalizer;
 use spm_ocr::corpus::rewrite::{OnInvalidUtf8, Tally, rewrite_file};
 use spm_ocr::corpus::scan;
 use spm_ocr::corpus::source::{Discovery, Source, discover};
+use spm_ocr::crosscheck;
 use spm_ocr::model::{artifact, pieces, suite};
 use spm_ocr::render;
 use spm_ocr::report::{Report, Severity};
@@ -237,11 +239,7 @@ fn main() -> Result<()> {
             output,
         } => {
             configure_threads(output.jobs)?;
-
-            // Corpus first: several model defects originate in the data, and a report that led
-            // with the model would invite a retrain which reproduces the defect exactly.
-            let mut report = scan_corpus(&corpus);
-            report.extend(check_model(&model, &tuning.options())?);
+            let report = check_both(&model, &corpus, &tuning.options())?;
 
             emit(&report, &output);
             std::process::exit(report.exit_code(output.fail_on.into()));
@@ -255,6 +253,28 @@ fn check_model(path: &Path, options: &suite::Options) -> Result<Report> {
     Ok(suite::check(&artifact, options))
 }
 
+/// Both checklists, plus the checks that need them together.
+///
+/// The model is read *first*, even though its findings are reported last. It records the
+/// `max_sentence_length` the corpus must be measured against, and scanning before knowing it
+/// would mean measuring against a default the trainer will not use.
+fn check_both(model: &Path, corpus: &[PathBuf], options: &suite::Options) -> Result<Report> {
+    step("reading the model…");
+    let artifact = artifact::load(model)?;
+
+    let axes = default_axes();
+    let limit = crosscheck::line_limit(&artifact).unwrap_or(scan::DEFAULT_MAX_LINE_BYTES);
+    let config = scan::Config::new(&axes).with_max_line_bytes(limit);
+
+    // Corpus first in the report: several model defects originate in the data, and leading with
+    // the model would invite a retrain which reproduces the defect exactly.
+    let (mut report, combined) = scan_corpus_with(corpus, &config);
+    report.extend(suite::check(&artifact, options));
+    report.extend(crosscheck::check(&combined, &artifact, limit));
+
+    Ok(report)
+}
+
 /// Size rayon's pool once, up front. Left to rayon's own default when unset — its work-stealing
 /// handles a heterogeneous machine better than a core-count heuristic can.
 fn configure_threads(jobs: Option<usize>) -> Result<()> {
@@ -266,7 +286,12 @@ fn configure_threads(jobs: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-fn scan_corpus(paths: &[PathBuf]) -> Report {
+/// Scan a corpus, returning the report and the combined counts the cross-check needs.
+///
+/// `long_lines` is deliberately not added here: on its own the scan can only measure against
+/// SentencePiece's default, while `all` measures against the model's actual limit. Whichever
+/// caller knows the better number emits the finding, so it is never reported twice.
+fn scan_corpus_with(paths: &[PathBuf], config: &scan::Config) -> (Report, scan::Counts) {
     step("discovering files…");
     let found = discover(paths);
 
@@ -274,9 +299,26 @@ fn scan_corpus(paths: &[PathBuf]) -> Report {
         note_line(&note);
     }
 
+    let totals = scan_with_progress(&found, config);
+    let combined = scan::combined(&totals);
+
+    let mut report = scan::report(&totals, config.axes);
+    report.findings.push(balance::script_balance(&combined));
+
+    (report, combined)
+}
+
+/// The `corpus` subcommand: no model, so the line limit is SentencePiece's default.
+fn scan_corpus(paths: &[PathBuf]) -> Report {
     let axes = default_axes();
-    let totals = scan_with_progress(&found, &axes);
-    scan::report(&totals, &axes)
+    let (limit, source) = balance::default_limit();
+    let config = scan::Config::new(&axes).with_max_line_bytes(limit);
+
+    let (mut report, combined) = scan_corpus_with(paths, &config);
+    report
+        .findings
+        .push(balance::long_lines(&combined, limit, source));
+    report
 }
 
 /// Rewrite every source, then scan what was written.
@@ -307,7 +349,8 @@ fn canonicalize_corpus(
     let written = rewrite_with_progress(&found, destination, &canonicalizer, on_invalid)?;
 
     let axes = default_axes();
-    let totals = scan_with_progress(&discover(&written), &axes);
+    let config = scan::Config::new(&axes);
+    let totals = scan_with_progress(&discover(&written), &config);
     Ok(scan::report(&totals, &axes))
 }
 
@@ -344,14 +387,14 @@ fn rewrite_with_progress(
     Ok(targets)
 }
 
-fn scan_with_progress(found: &Discovery, axes: &[spm_ocr::corpus::axis::Axis]) -> scan::Totals {
+fn scan_with_progress(found: &Discovery, config: &scan::Config) -> scan::Totals {
     let bar = byte_bar(found.total_bytes(), "scanning");
 
     let totals: scan::Totals = found
         .sources
         .par_iter()
         .map(|source| {
-            let counts = scan::scan_source(source, axes).unwrap_or_default();
+            let counts = scan::scan_source(source, config).unwrap_or_default();
             bar.inc(source.size_bytes());
             (source.label(), counts)
         })

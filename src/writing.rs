@@ -33,21 +33,37 @@ impl Writing {
 /// Punctuation, whitespace and symbols are `Common`, and combining marks are `Inherited`. Both
 /// appear legitimately inside pieces of every script, so counting them would make every ordinary
 /// piece look like a cross-script merge.
-fn writing_of(character: char) -> Option<Writing> {
+pub fn writing_of(character: char) -> Option<Writing> {
+    // ASCII settles without touching the tables. Even text that is not ASCII overall is mostly
+    // ASCII by character — `naive café` is nine plain bytes and one accented one — so this skips
+    // the binary search for the large majority of a typical corpus.
+    if character.is_ascii() {
+        if character.is_ascii_alphabetic() {
+            return Some(Writing::Script(Script::Latin));
+        }
+        if character.is_ascii_digit() {
+            return Some(Writing::Digit);
+        }
+        // Punctuation, whitespace and the control range are all Common, and none is a digit.
+        return None;
+    }
+
     let script = character.script();
 
-    // A digit carrying a real script — Devanagari's, say — is that script's text, and is left
-    // to it. Only the script-neutral digits become `Digit`.
-    if character.general_category() == GeneralCategory::DecimalNumber
-        && matches!(script, Script::Common | Script::Inherited | Script::Unknown)
-    {
+    // Script first, and the category only for the characters whose script did not settle it.
+    // Both are binary searches through the Unicode tables, and this is called per character of
+    // the corpus — so the ordering here is the difference between one lookup and two.
+    if !matches!(script, Script::Common | Script::Inherited | Script::Unknown) {
+        // A digit carrying a real script — Devanagari's, say — is that script's text, and is
+        // left to it. Only the script-neutral digits become `Digit`.
+        return Some(Writing::Script(script));
+    }
+
+    if character.general_category() == GeneralCategory::DecimalNumber {
         return Some(Writing::Digit);
     }
 
-    match script {
-        Script::Common | Script::Inherited | Script::Unknown => None,
-        script => Some(Writing::Script(script)),
-    }
+    None
 }
 
 /// Every writing system present in `text`, ordered by name so evidence is stable between runs.

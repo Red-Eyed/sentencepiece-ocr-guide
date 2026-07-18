@@ -25,9 +25,15 @@ defect, and discovering that after training costs you the training run. Findings
 severity and each carries its remedy — `fix_corpus` findings must be acted on before any
 retrain, because retraining alone reproduces them.
 
-Two items under **Corpus** remain manual — per-category share and lines dropped by
-`max_sentence_length`. Note that neither is fixed by canonicalizing, which is why the remedy is
-tracked per finding rather than per checklist.
+Per-script share and lines dropped by `max_sentence_length` are both reported by the scan.
+Neither is fixed by canonicalizing, which is why the remedy is tracked per finding rather than
+per checklist.
+
+The dropped-line count is the one check that needs both halves, so it is only exact under
+`spm-ocr all`: the limit is a property of the model, and scanning a corpus on its own can only
+measure against SentencePiece's default. `script_coverage`, which compares each script's share of
+the corpus against its share of the vocabulary, needs both for the same reason — it is the part
+of `fertility` that survives without a tokenizer runtime.
 
 ## Corpus
 

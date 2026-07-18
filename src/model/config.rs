@@ -215,6 +215,7 @@ mod tests {
             split_digits: true,
             split_by_unicode_script: true,
             max_piece_length: 8,
+            max_line_bytes: 4192,
             character_coverage: 0.9998,
             user_defined_symbols: Vec::new(),
         }

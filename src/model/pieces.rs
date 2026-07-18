@@ -5,8 +5,8 @@
 //! for every input the tokenizer can ever be given.
 
 use crate::model::artifact::{Trainer, Vocabulary, surface};
-use crate::model::writing::{is_all_digits, writing_systems_in};
 use crate::report::{Finding, Remedy, Severity};
+use crate::writing::{is_all_digits, writing_systems_in};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 /// A digit-only piece longer than this teaches the decoder to reproduce familiar numbers.
@@ -194,6 +194,7 @@ mod tests {
             split_digits: true,
             split_by_unicode_script: true,
             max_piece_length: 8,
+            max_line_bytes: 4192,
             character_coverage: 0.9998,
             user_defined_symbols: symbols.iter().map(|s| (*s).to_string()).collect(),
         }

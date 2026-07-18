@@ -42,12 +42,49 @@ use crate::report::{Finding, MAX_EVIDENCE, Remedy, Report, Severity};
 /// so this is a floor rather than a cap — a single line longer than this is one chunk.
 const CHUNK_BYTES: usize = 1 << 20;
 
+/// SentencePiece's own default for `max_sentence_length`, in bytes.
+///
+/// Used when no model is available to say otherwise. The trainer does not warn about lines above
+/// it — the protobuf's own comment is that a longer sentence "is simply ignored".
+pub const DEFAULT_MAX_LINE_BYTES: usize = 4192;
+
+/// What to measure in one pass.
+///
+/// A struct rather than loose parameters so that adding a measurement does not re-thread every
+/// signature between here and the CLI.
+#[derive(Debug, Clone, Copy)]
+pub struct Config<'a> {
+    pub axes: &'a [Axis],
+    /// Lines longer than this are dropped by the trainer, silently.
+    pub max_line_bytes: usize,
+}
+
+impl<'a> Config<'a> {
+    pub fn new(axes: &'a [Axis]) -> Self {
+        Self {
+            axes,
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+        }
+    }
+
+    /// Measure against a specific model's limit rather than the default.
+    pub fn with_max_line_bytes(mut self, limit: usize) -> Self {
+        self.max_line_bytes = limit;
+        self
+    }
+}
+
 /// What one unit of work observed. Merged commutatively, so completion order cannot affect the
 /// report — a parallel run and a serial one produce identical output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
     pub lines: u64,
     pub invalid_utf8: u64,
+    /// Lines whose byte length exceeds the configured limit.
+    pub long_lines: u64,
+    /// Characters per writing system, which is what corpus balance is measured in — a line can
+    /// draw on several scripts, so lines are the wrong denominator.
+    pub per_script: BTreeMap<&'static str, u64>,
     /// Affected-line count per axis name. Ordered so merging and rendering are deterministic.
     pub per_axis: BTreeMap<&'static str, u64>,
 }
@@ -56,16 +93,31 @@ impl Counts {
     fn merge(mut self, other: Counts) -> Counts {
         self.lines += other.lines;
         self.invalid_utf8 += other.invalid_utf8;
+        self.long_lines += other.long_lines;
         for (axis, count) in other.per_axis {
             *self.per_axis.entry(axis).or_default() += count;
         }
+        for (script, count) in other.per_script {
+            *self.per_script.entry(script).or_default() += count;
+        }
         self
+    }
+
+    /// Total characters attributed to some writing system.
+    pub fn script_characters(&self) -> u64 {
+        self.per_script.values().sum()
     }
 }
 
-/// Count one line against every axis.
-pub fn count_line(line: &str, axes: &[Axis], counts: &mut Counts) {
+/// Count one line against every axis, and tally what it is written in.
+pub fn count_line(line: &str, config: &Config, counts: &mut Counts) {
     counts.lines += 1;
+
+    if line.len() > config.max_line_bytes {
+        counts.long_lines += 1;
+    }
+
+    count_scripts(line, counts);
 
     // No axis fires on ASCII, so the whole axis loop is skipped for what is typically most of a
     // corpus. `Axis::apply` re-checks this; doing it here as well skips the dispatch entirely.
@@ -73,22 +125,45 @@ pub fn count_line(line: &str, axes: &[Axis], counts: &mut Counts) {
         return;
     }
 
-    for axis in axes {
+    for axis in config.axes {
         if axis.affects(line) {
             *counts.per_axis.entry(axis.name).or_default() += 1;
         }
     }
 }
 
+/// Tally characters per writing system.
+///
+/// [`crate::writing::writing_of`] settles ASCII without a table lookup, so the per-character cost
+/// here is a comparison for most of a typical corpus.
+fn count_scripts(line: &str, counts: &mut Counts) {
+    // A line draws on very few writing systems, so it is tallied into a short vec and folded into
+    // the map once. The obvious version — `entry()` per character — pays a B-tree descent for
+    // every character in the corpus, which dominated the scan when this was first written.
+    let mut local: Vec<(&'static str, u64)> = Vec::new();
+
+    for writing in line.chars().filter_map(crate::writing::writing_of) {
+        let name = writing.name();
+        match local.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, count)) => *count += 1,
+            None => local.push((name, 1)),
+        }
+    }
+
+    for (name, count) in local {
+        *counts.per_script.entry(name).or_default() += count;
+    }
+}
+
 /// Count a block of complete lines.
-fn count_block(block: &[u8], axes: &[Axis]) -> Counts {
+fn count_block(block: &[u8], config: &Config) -> Counts {
     let mut counts = Counts::default();
 
     match std::str::from_utf8(block) {
         // The overwhelmingly common case: the whole block decodes, so it is split once.
         Ok(text) => {
             for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                count_line(line, axes, &mut counts);
+                count_line(line, config, &mut counts);
             }
         }
         // Something in this block is not UTF-8. Fall back to per-line decoding so the damage is
@@ -97,7 +172,7 @@ fn count_block(block: &[u8], axes: &[Axis]) -> Counts {
             for line in block.split(|&b| b == b'\n') {
                 match std::str::from_utf8(line) {
                     Ok(text) if text.trim().is_empty() => {}
-                    Ok(text) => count_line(text, axes, &mut counts),
+                    Ok(text) => count_line(text, config, &mut counts),
                     Err(_) => {
                         counts.lines += 1;
                         counts.invalid_utf8 += 1;
@@ -134,13 +209,13 @@ fn line_aligned_chunks(data: &[u8]) -> Vec<std::ops::Range<usize>> {
 }
 
 /// Scan one source, counting every axis in a single pass over the file.
-pub fn scan_source(source: &Source, axes: &[Axis]) -> std::io::Result<Counts> {
+pub fn scan_source(source: &Source, config: &Config) -> std::io::Result<Counts> {
     let data = source.map()?;
     let bytes: &[u8] = &data;
 
     // A short file is not worth splitting; the chunk list would cost more than the work.
     if bytes.len() <= CHUNK_BYTES {
-        return Ok(count_block(bytes, axes));
+        return Ok(count_block(bytes, config));
     }
 
     // Every range comes from `line_aligned_chunks(bytes)` and so is in bounds; taking the
@@ -150,13 +225,20 @@ pub fn scan_source(source: &Source, axes: &[Axis]) -> std::io::Result<Counts> {
         .map(|range| {
             bytes
                 .get(range)
-                .map_or_else(Counts::default, |c| count_block(c, axes))
+                .map_or_else(Counts::default, |c| count_block(c, config))
         })
         .reduce(Counts::default, Counts::merge))
 }
 
 /// Per-source totals, in the order the sources were supplied.
 pub type Totals = Vec<(String, Counts)>;
+
+/// Every source's counts folded into one, for checks that ask about the corpus as a whole.
+pub fn combined(totals: &Totals) -> Counts {
+    totals.iter().fold(Counts::default(), |all, (_, counts)| {
+        all.merge(counts.clone())
+    })
+}
 
 /// Turn scan totals into the report the checklist renders.
 pub fn report(totals: &Totals, axes: &[Axis]) -> Report {
@@ -257,8 +339,8 @@ fn evidence(totals: &Totals, count: impl Fn(&Counts) -> u64) -> Vec<String> {
 
 /// Where a scan reads its bytes from — the seam that keeps [`scan_source`] off the filesystem
 /// in tests.
-pub fn scan_bytes(bytes: &[u8], axes: &[Axis]) -> Counts {
-    count_block(bytes, axes)
+pub fn scan_bytes(bytes: &[u8], config: &Config) -> Counts {
+    count_block(bytes, config)
 }
 
 #[cfg(test)]
@@ -267,7 +349,7 @@ mod tests {
     use crate::corpus::axis::default_axes;
 
     fn counts_for(text: &str) -> Counts {
-        scan_bytes(text.as_bytes(), &default_axes())
+        scan_bytes(text.as_bytes(), &Config::new(&default_axes()))
     }
 
     #[test]
@@ -296,7 +378,7 @@ mod tests {
         bytes.extend_from_slice(b"caf\xe9 bad\n");
         bytes.extend_from_slice("another good\n".as_bytes());
 
-        let counts = scan_bytes(&bytes, &default_axes());
+        let counts = scan_bytes(&bytes, &Config::new(&default_axes()));
         assert_eq!(counts.invalid_utf8, 1);
         assert_eq!(counts.lines, 3, "the good lines still counted");
     }

@@ -9,6 +9,8 @@
 //! can carry [`report::Remedy::FixCorpus`]: retraining alone would reproduce it.
 
 pub mod corpus;
+pub mod crosscheck;
 pub mod model;
 pub mod render;
 pub mod report;
+pub mod writing;
