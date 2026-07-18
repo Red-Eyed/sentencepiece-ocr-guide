@@ -24,6 +24,12 @@ DEFAULT_SAMPLES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             # ґ ї є і and the apostrophe are exactly what a Russian-trained tokenizer lacks.
             "Ґудзик, аґрус і п'ятдесят щиглів: об'єкти цієї шафи.",
         ),
+        # Latin script, but the trap is normalization rather than script: stacked
+        # tone-plus-vowel diacritics are where NFD input silently doubles fertility.
+        "vietnamese": (
+            "Hệ thống nhận dạng ký tự quang học cần dữ liệu cân bằng.",
+            "Đường phố Hà Nội rợp bóng cây bàng mùa thu.",
+        ),
         "greek": ("Ταχίστη αλώπηξ βαφής ψημένη γη.",),
         "cjk": (
             "光学字符识别系统的准确率取决于标注质量。",
@@ -34,10 +40,20 @@ DEFAULT_SAMPLES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "نظام التعرف الضوئي على الحروف يحتاج إلى بيانات متوازنة.",
             "می‌رود و میرود دو کلمهٔ متفاوت هستند.",  # ZWNJ — failure mode #3
         ),
+        "hebrew": (
+            "מערכת זיהוי תווים אופטי דורשת נתונים מאוזנים.",
+            # Pointed text: niqqud roughly double the codepoints per word, so a vocabulary
+            # trained on unpointed text tokenizes this at a wildly different rate.
+            "בְּרֵאשִׁית בָּרָא אֱלֹהִים אֵת הַשָּׁמַיִם וְאֵת הָאָרֶץ.",
+        ),
         "devanagari": (
             "प्रकाशिक वर्ण पहचान प्रणाली की सटीकता।",
             "क्ष त्र ज्ञ श्र संयुक्ताक्षर हैं।",
         ),
+        # Bengali is conjunct-heavy where Tamil is not; one Indic group tests one Indic
+        # behaviour, so Devanagari alone does not stand in for the others.
+        "bengali": ("আলোকীয় অক্ষর শনাক্তকরণ ব্যবস্থার নির্ভুলতা।",),
+        "tamil": ("ஒளி எழுத்து உணரும் அமைப்பின் துல்லியம்.",),
         "thai": ("ระบบรู้จำอักขระด้วยแสงต้องการข้อมูลที่สมดุล",),
         "math": (
             r"\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
