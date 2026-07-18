@@ -20,8 +20,9 @@ DEFAULT_SAMPLES: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             "Ligature test: office, flour, definite.",
         ),
         "cyrillic": (
-            "Съешь же ещё этих мягких французских булок.",
-            "Широкая электрификация южных губерний.",
+            "Жебракує філософ тьмяне сяйво знань, чуючи гидоту зимових вечорів.",
+            # ґ ї є і and the apostrophe are exactly what a Russian-trained tokenizer lacks.
+            "Ґудзик, аґрус і п'ятдесят щиглів: об'єкти цієї шафи.",
         ),
         "greek": ("Ταχίστη αλώπηξ βαφής ψημένη γη.",),
         "cjk": (
