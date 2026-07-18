@@ -82,12 +82,18 @@ and the order matters — most model defects originate in the corpus, so scannin
 a training run:
 
 ```
-uv run spm-ocr corpus       corpus/                    # 1. measure
-uv run spm-ocr canonicalize corpus/ --out canonical/   # 2. fix, then verify
-uv run spm-ocr model        ocr_tokenizer.model        # 3. after training
-uv run spm-ocr all          ocr_tokenizer.model --corpus canonical/
-uv run spm-ocr model        ocr_tokenizer.model --json # for CI
+just workflow                              # the whole flow, with runnable examples
+just scan       corpus/                    # 1. measure
+just canon      corpus/ canonical/         # 2. fix, then verify
+                                           # 3. train your tokenizer on canonical/
+just check-model ocr.model                 # 4. after training
+just check-all   ocr.model canonical/      # both checklists, corpus findings first
+just options                               # every flag for every subcommand
 ```
+
+Recipes forward extra flags (`just scan corpus/ --jobs 2 --json`) and print the underlying
+`spm-ocr` command, so nothing is hidden. `just` on its own lists everything, split into
+`[workflow]` and `[dev]`.
 
 Directories are walked recursively. Binary files are skipped by content, not extension — the
 trained `.model` sitting beside your corpus is the usual reason that matters — and what was
@@ -138,8 +144,9 @@ Architecture: [`checks/`](sentencepiece_ocr_guide/checks/README.md) (the artifac
 The repo is a Python project (`uv` + `just`); the checks live alongside the guide they encode.
 
 ```
-just          # list recipes
+just          # list recipes, grouped into [workflow] and [dev]
 just check    # fmt-check + lint + types + test
+just runtime  # which interpreter, GIL on or off, default --jobs
 just hooks    # install prek git hooks
 ```
 
