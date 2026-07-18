@@ -55,55 +55,61 @@ fn vocabulary_findings(vocabulary: &Vocabulary, options: &Options) -> Vec<Findin
     }
 
     vec![
-        pieces::digit_pieces(vocabulary, options.max_digit_piece_length),
-        pieces::cross_script_pieces(vocabulary, options.digits_are_a_script),
-        pieces::nfc_vocabulary(vocabulary),
-        budget::vocabulary_budget(vocabulary),
+        pieces::digit_pieces(vocabulary, options.max_digit_piece_length).about(12),
+        pieces::cross_script_pieces(vocabulary, options.digits_are_a_script).about(11),
+        pieces::nfc_vocabulary(vocabulary).about(4),
+        budget::vocabulary_budget(vocabulary).about(13),
     ]
 }
 
 fn trainer_findings(vocabulary: &Vocabulary, trainer: &Trainer) -> Vec<Finding> {
     vec![
-        config::no_unknown(vocabulary, trainer),
+        config::no_unknown(vocabulary, trainer).about(1),
+        // `protected_symbols` is uncited: command atomicity is argued in docs/06-math-latex.md,
+        // and the nearest numbered mode (#14, text/math imbalance) is a different failure.
         pieces::protected_symbols(vocabulary, trainer),
-        config::algorithm(trainer),
-        config::split_digits(trainer),
-        config::script_splitting(trainer),
+        config::algorithm(trainer).about(6),
+        config::split_digits(trainer).about(12),
+        config::script_splitting(trainer).about(11),
+        // Spans #8, #9, #10 and #20 at once, so it cites none of them and reports the numbers.
         config::trainer_settings(trainer),
     ]
 }
 
 fn normalizer_findings(normalizer: &Normalizer) -> Vec<Finding> {
     vec![
-        config::no_phantom_prefix(normalizer),
-        config::whitespace_preserved(normalizer),
-        config::normalization_rule(normalizer),
+        config::no_phantom_prefix(normalizer).about(21),
+        config::whitespace_preserved(normalizer).about(2),
+        config::normalization_rule(normalizer).about(2),
     ]
 }
 
-const VOCABULARY_CHECKS: &[(&str, Severity)] = &[
-    ("digit_pieces", Severity::High),
-    ("cross_script_pieces", Severity::High),
-    ("nfc_vocabulary", Severity::Blocker),
+/// Each check, the severity it carries, and the guide entry it covers.
+type Covered = (&'static str, Severity, Option<u8>);
+
+const VOCABULARY_CHECKS: &[Covered] = &[
+    ("digit_pieces", Severity::High, Some(12)),
+    ("cross_script_pieces", Severity::High, Some(11)),
+    ("nfc_vocabulary", Severity::Blocker, Some(4)),
 ];
 
-const TRAINER_CHECKS: &[(&str, Severity)] = &[
-    ("no_unknown", Severity::Blocker),
-    ("protected_symbols", Severity::High),
-    ("algorithm", Severity::Medium),
-    ("split_digits", Severity::High),
-    ("script_splitting", Severity::Medium),
+const TRAINER_CHECKS: &[Covered] = &[
+    ("no_unknown", Severity::Blocker, Some(1)),
+    ("protected_symbols", Severity::High, None),
+    ("algorithm", Severity::Medium, Some(6)),
+    ("split_digits", Severity::High, Some(12)),
+    ("script_splitting", Severity::Medium, Some(11)),
 ];
 
-const NORMALIZER_CHECKS: &[(&str, Severity)] = &[
-    ("no_phantom_prefix", Severity::High),
-    ("whitespace_preserved", Severity::High),
+const NORMALIZER_CHECKS: &[Covered] = &[
+    ("no_phantom_prefix", Severity::High, Some(21)),
+    ("whitespace_preserved", Severity::High, Some(2)),
 ];
 
 /// Checks that need to encode text, which reading the model file does not enable.
-const NEEDS_ENCODING: &[(&str, Severity)] = &[
-    ("fertility", Severity::Medium),
-    ("byte_fallback_rate", Severity::High),
+const NEEDS_ENCODING: &[Covered] = &[
+    ("fertility", Severity::Medium, Some(13)),
+    ("byte_fallback_rate", Severity::High, Some(17)),
 ];
 
 fn needs_a_tokenizer_runtime() -> Vec<Finding> {
@@ -114,11 +120,15 @@ fn needs_a_tokenizer_runtime() -> Vec<Finding> {
 }
 
 /// Skips that keep the severity of the check they stand in for.
-fn unavailable(checks: &[(&str, Severity)], reason: &str) -> Vec<Finding> {
+fn unavailable(checks: &[Covered], reason: &str) -> Vec<Finding> {
     checks
         .iter()
-        .map(|(name, severity)| {
-            Finding::skipped(*name, reason).graded(*severity, Remedy::RetrainConfig)
+        .map(|(name, severity, mode)| {
+            let finding = Finding::skipped(*name, reason).graded(*severity, Remedy::RetrainConfig);
+            match mode {
+                Some(mode) => finding.about(*mode),
+                None => finding,
+            }
         })
         .collect()
 }

@@ -20,23 +20,32 @@ Two things make these failures expensive:
 
 ## Where you die
 
-| # | Failure | Effect on the OCR product | Silent? |
-|---|---|---|---|
-| 1 | `<unk>` in the vocab path | Character is **permanently unreadable** — no path to ever emit it | Yes |
-| 2 | Tokenizer normalizes more than GT | Model asked to emit what its vocab can't represent | Yes |
-| 3 | Normalization strips ZWJ/ZWNJ | Wrong words in Persian, Hindi, Bengali | Yes |
-| 4 | **Mixed corpus encodings** — *the one to expect* | Identical text trains as two sequences — signal divided | Yes — *round-trip misses it* |
-| 5 | Arabic presentation forms | Two redundant token sets for the same letters | Yes |
-| 6 | Invalid byte sequences at inference | Decoder emits bytes that aren't valid UTF-8 → mojibake or crash | **No** — but only in production |
-| 7 | Vocab too large | Rare classes undertrained; per-class accuracy drops | Yes |
-| 8 | Vocab too small | Longer sequences, more steps to derail, slower | Yes |
-| 9 | Long pieces | Poor error locality — one wrong token, several wrong characters | Yes |
-| 10 | Cross-script merges | Wasted budget, higher confusability | Yes |
-| 11 | Multi-digit pieces | Memorizes frequent numbers, misreads the ones on the page | Yes |
-| 12 | Script imbalance | Low-resource scripts fragment → measurably worse accuracy | Yes |
-| 13 | Dropped long lines | Loses exactly the hard examples (matrices, tables) | Yes |
-| 14 | Tokenizer swapped post-training | Total label-space shift — garbage output | Yes |
-| 15 | Special-token id collision | Off-by-one label shift across the whole vocab | Yes |
+Numbers are used throughout this guide and by `spm-ocr`, which cites them in its findings. They
+match the detailed entries below one-for-one.
+
+| # | Failure | Effect on the OCR product | Silent? | Checked by |
+|---|---|---|---|---|
+| 1 | `<unk>` in the vocab path | Character is **permanently unreadable** — no path to ever emit it | Yes | `no_unknown` |
+| 2 | Tokenizer normalizes more than GT | Model asked to emit what its vocab can't represent | Yes | `normalization_rule`, `whitespace_preserved` |
+| 3 | Normalization strips ZWJ/ZWNJ | Wrong words in Persian, Hindi, Bengali | Yes | `axis[zero_width_joiners]` |
+| 4 | **Mixed corpus encodings** — *the one to expect* | Identical text trains as two sequences — signal divided | Yes — *round-trip misses it* | `axis[*]`, `nfc_vocabulary` |
+| 5 | Arabic presentation forms | Two redundant token sets for the same letters | Yes | `axis[arabic_presentation_forms]` |
+| 6 | Subword regularization as a decoder target | Same image maps to different label sequences across epochs | Yes | `algorithm` |
+| 7 | Invalid byte sequences at inference | Decoder emits bytes that aren't valid UTF-8 → mojibake or crash | **No** — but only in production | `invalid_utf8` |
+| 8 | Vocab too large | Rare classes undertrained; per-class accuracy drops | Yes | `trainer_settings` |
+| 9 | Vocab too small | Longer sequences, more steps to derail, slower | Yes | `trainer_settings` |
+| 10 | Pieces that are too long | Poor error locality — one wrong token, several wrong characters | Yes | `trainer_settings` |
+| 11 | Cross-script merges | Wasted budget, higher confusability | Yes | `cross_script_pieces`, `script_splitting` |
+| 12 | Multi-digit pieces | Memorizes frequent numbers, misreads the ones on the page | Yes | `digit_pieces`, `split_digits` |
+| 13 | Script imbalance | Low-resource scripts fragment → measurably worse accuracy | Yes | `script_coverage`, `script_balance` |
+| 14 | Text/math imbalance | Either notation starves the other | Yes | — |
+| 15 | Lines dropped by `max_sentence_length` | Loses exactly the hard examples (matrices, tables) | Yes | `long_lines` |
+| 16 | Corpus/deployment domain mismatch | Sequences run long on the documents you deployed for | Yes | — |
+| 17 | `character_coverage` too low for CJK | Rare-but-real characters fall to byte fallback — 3 tokens each | Yes | `byte_fallback_rate` |
+| 18 | Tokenizer swapped post-training | Total label-space shift — garbage output | Yes | — |
+| 19 | Special-token id collision | Off-by-one label shift across the whole vocab | Yes | — |
+| 20 | Vocab size vs. output layer mismatch | A vocab just above the byte floor is nearly character-level | Yes | `trainer_settings` |
+| 21 | Whitespace policy mismatch | Eval measures a difference introduced after the model was right | Yes | `no_phantom_prefix` |
 
 ## If you fix one thing, fix #4
 

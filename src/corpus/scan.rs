@@ -284,7 +284,14 @@ fn axis_finding(axis: &Axis, totals: &Totals, scanned: u64) -> Finding {
     let check = format!("axis[{}]", axis.name);
 
     if affected == 0 {
-        return Finding::passed(check, format!("no variation across {scanned} lines"));
+        return Finding::passed(
+            check,
+            format!(
+                "no variation across {} lines",
+                crate::format::count(scanned)
+            ),
+        )
+        .about(axis.failure_mode());
     }
 
     // `Preserve` has no failure severity, and that absence *is* the distinction: such an axis
@@ -301,16 +308,23 @@ fn axis_finding(axis: &Axis, totals: &Totals, scanned: u64) -> Finding {
         return Finding::passed(
             check,
             format!(
-                "{affected} of {scanned} lines — {} (expected — preserve, do not fold)",
+                "{} lines — {} (expected — preserve, do not fold)",
+                crate::format::ratio(affected, scanned),
                 axis.rationale
             ),
-        );
+        )
+        .about(axis.failure_mode());
     };
 
     Finding::failed(
         check,
-        format!("{affected} of {scanned} lines — {}", axis.rationale),
+        format!(
+            "{} lines — {}",
+            crate::format::ratio(affected, scanned),
+            axis.rationale
+        ),
     )
+    .about(axis.failure_mode())
     .with_evidence(evidence(totals, |c| {
         c.per_axis.get(axis.name).copied().unwrap_or(0)
     }))
@@ -333,7 +347,9 @@ fn evidence(totals: &Totals, count: impl Fn(&Counts) -> u64) -> Vec<String> {
     ranked
         .into_iter()
         .take(MAX_EVIDENCE)
-        .map(|(name, affected, lines)| format!("{name}: {affected} / {lines} lines"))
+        .map(|(name, affected, lines)| {
+            format!("{name}: {} lines", crate::format::ratio(affected, lines))
+        })
         .collect()
 }
 

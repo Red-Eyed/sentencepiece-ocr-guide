@@ -73,6 +73,23 @@ impl Remedy {
     }
 }
 
+/// Which numbered failure mode in `docs/09-failure-modes.md` a finding is about.
+///
+/// A number rather than a free-text citation, so a finding cannot cite a page that does not
+/// exist or drift out of step with the guide's wording. The table there carries the same numbers
+/// and names the check that covers each one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FailureMode(pub u8);
+
+impl FailureMode {
+    /// The highest mode the guide defines. Anything above it is a typo rather than a reference.
+    pub const HIGHEST: u8 = 21;
+
+    pub fn citation(self) -> String {
+        format!("failure mode #{} — docs/09-failure-modes.md", self.0)
+    }
+}
+
 /// The outcome of one check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
@@ -82,6 +99,8 @@ pub struct Finding {
     pub evidence: Vec<String>,
     pub severity: Severity,
     pub remedy: Remedy,
+    /// The guide entry this finding is about, when there is one.
+    pub failure_mode: Option<FailureMode>,
 }
 
 impl Finding {
@@ -97,6 +116,7 @@ impl Finding {
             evidence: Vec::new(),
             severity: Severity::Info,
             remedy: Remedy::NotApplicable,
+            failure_mode: None,
         }
     }
 
@@ -109,6 +129,7 @@ impl Finding {
             evidence: Vec::new(),
             severity: Severity::High,
             remedy: Remedy::RetrainConfig,
+            failure_mode: None,
         }
     }
 
@@ -121,6 +142,7 @@ impl Finding {
             evidence: Vec::new(),
             severity: Severity::Info,
             remedy: Remedy::NotApplicable,
+            failure_mode: None,
         }
     }
 
@@ -143,6 +165,19 @@ impl Finding {
             self.severity = severity;
             self.remedy = remedy;
         }
+        self
+    }
+
+    /// Cite the guide entry this check is about.
+    ///
+    /// Applies to passes as well as failures: knowing which failure mode a green line rules out
+    /// is what makes the report readable as a checklist rather than a list of assertions.
+    pub fn about(mut self, mode: u8) -> Self {
+        debug_assert!(
+            (1..=FailureMode::HIGHEST).contains(&mode),
+            "failure mode {mode} is not in docs/09-failure-modes.md"
+        );
+        self.failure_mode = Some(FailureMode(mode));
         self
     }
 

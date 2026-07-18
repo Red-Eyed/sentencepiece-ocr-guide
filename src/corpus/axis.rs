@@ -94,6 +94,19 @@ impl Axis {
         }
     }
 
+    /// The guide entry this axis is evidence for.
+    ///
+    /// Nearly every axis is the same defect wearing a different costume — the same text encoded
+    /// two ways, which is mode #4. The two exceptions detect something the guide calls out on
+    /// its own.
+    pub fn failure_mode(&self) -> u8 {
+        match self.name {
+            "zero_width_joiners" => 3,
+            "arabic_presentation_forms" => 5,
+            _ => 4,
+        }
+    }
+
     /// Whether this axis changes the line.
     ///
     /// Reads the borrow rather than comparing strings: a transform that had nothing to do

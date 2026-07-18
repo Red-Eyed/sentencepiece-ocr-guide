@@ -26,7 +26,7 @@ pub fn digit_pieces(vocabulary: &Vocabulary, max_length: usize) -> Finding {
             is_all_digits(text) && text.chars().count() > max_length
         })
         // The raw text, because `250` and `▁250` are distinct vocabulary entries.
-        .map(|piece| format!("{:?}", piece.text))
+        .map(|piece| crate::format::literal(&piece.text))
         .collect();
 
     if offenders.is_empty() {
@@ -68,7 +68,11 @@ pub fn cross_script_pieces(vocabulary: &Vocabulary, digits_are_a_script: bool) -
             }
 
             let names: Vec<&str> = present.iter().map(|w| w.name()).collect();
-            Some(format!("{text:?} spans {}", names.join("+")))
+            Some(format!(
+                "{} spans {}",
+                crate::format::literal(&text),
+                names.join("+")
+            ))
         })
         .collect();
 
@@ -108,8 +112,13 @@ pub fn nfc_vocabulary(vocabulary: &Vocabulary) -> Finding {
         .filter(|piece| !is_nfc(&piece.text))
         .map(|piece| {
             let composed: String = piece.text.nfc().collect();
-            // Escaped, because the two forms are visually identical — which is the problem.
-            format!("{:?} should be {:?}", piece.text, composed)
+            // Both forms rendered *and* spelled out: they are the same picture, and the code
+            // points are the only visible difference.
+            format!(
+                "{} should be {}",
+                crate::format::literal(&piece.text),
+                crate::format::literal(&composed)
+            )
         })
         .collect();
 
@@ -148,7 +157,12 @@ pub fn protected_symbols(vocabulary: &Vocabulary, trainer: &Trainer) -> Finding 
         .user_defined_symbols
         .iter()
         .filter(|symbol| !vocabulary.has_user_defined(symbol))
-        .map(|symbol| format!("{symbol:?} is declared but not in the vocabulary as one piece"))
+        .map(|symbol| {
+            format!(
+                "{} is declared but not in the vocabulary as one piece",
+                crate::format::literal(symbol)
+            )
+        })
         .collect();
 
     let declared = trainer.user_defined_symbols.len();
@@ -215,7 +229,7 @@ mod tests {
         // `250` and `▁250` are different entries; the evidence has to say which one.
         let vocabulary = vocabulary(&[("▁250", Kind::Normal)]);
         let finding = digit_pieces(&vocabulary, 1);
-        assert_eq!(finding.evidence, vec!["\"▁250\""]);
+        assert_eq!(finding.evidence, vec!["\"▁250\" [U+2581]"]);
     }
 
     #[test]
@@ -274,7 +288,7 @@ mod tests {
         let finding = protected_symbols(&vocabulary, &trainer_with(&["\\frac", "\\sum"]));
 
         assert_eq!(finding.status, Status::Failed);
-        assert!(finding.evidence[0].contains("\\\\sum"));
+        assert!(finding.evidence[0].contains("\\sum"));
     }
 
     #[test]

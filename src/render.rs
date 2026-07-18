@@ -45,6 +45,11 @@ fn format_finding(finding: &crate::report::Finding) -> String {
     for item in &finding.evidence {
         out.push_str(&format!("\n        {item}"));
     }
+    // The citation goes last, after the evidence it explains, and only where the guide has an
+    // entry to point at.
+    if let Some(mode) = finding.failure_mode {
+        out.push_str(&format!("\n        see {}", mode.citation()));
+    }
     out
 }
 

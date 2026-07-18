@@ -7,6 +7,62 @@ making explicit, because the real invariant is not "always use identity". It's:
 > **The tokenizer's normalization must equal the normalization applied to ground truth.**
 > A mismatch in either direction breaks round-trip exactness.
 
+## What the forms are — two knobs, not four choices
+
+Everything below depends on knowing what the four forms actually do, and the names are opaque
+enough to hide it. The problem they exist to solve is that Unicode allows one rendered string to
+be stored as more than one sequence of code points:
+
+```
+'café' == 'café'   ->   False        <- identical on screen, different in memory
+
+U+0063 U+0061 U+0066 U+00E9          NFC: 4 code points, "e with acute"
+U+0063 U+0061 U+0066 U+0065 U+0301   NFD: 5 code points, "e" + "combining acute"
+```
+
+Every equality test, dictionary lookup, dedup pass and tokenizer sees two different strings.
+Normalization is picking one spelling and forcing everything into it.
+
+**Knob one: composed or decomposed.** NFD splits accented characters into a base letter plus
+separate combining marks; NFC squashes them back wherever a single code point exists. The same
+information either way — you can convert back and forth forever.
+
+NFC is not literally "compose", though, and the reason is what makes it the right tool for the
+scripts in [script considerations](04-scripts.md). Give a base two combining marks and they can
+be typed in either order — `q` with a dot above and a dot below is `U+0071 U+0307 U+0323` or
+`U+0071 U+0323 U+0307`, one glyph, two encodings, and composing fixes nothing because there is
+no precomposed code point to compose *to*. So NFC decomposes first, sorts the marks into
+canonical order, then recomposes. Both spellings land on `U+0071 U+0323 U+0307`. That sorting
+step is why NFC is worth anything for Arabic and Devanagari, where stacked marks are the norm.
+
+**Knob two: the `K`, for compatibility.** A different kind of operation. Without it you are
+saying *these are the same character, encoded differently*. With it you are saying *these are
+different characters that mean roughly the same thing — collapse them anyway*:
+
+| | NFC | NFKC | |
+|---|---|---|---|
+| superscript | `x²` | `x2` | exponent, gone |
+| ligature `U+FB01` | `ﬁle` | `file` | split into two letters |
+| fullwidth | `Ａ` | `A` | folded to ASCII |
+| `U+338F` | `㎏` | `kg` | one code point becomes two |
+
+**And `K` is a one-way door.** Canonical composition has an inverse — NFD undoes NFC exactly.
+Compatibility folding has none. Nothing recovers the superscript from `x2`, because what
+distinguished it is no longer in the string. "Lossy" undersells it: this is deletion, not
+degradation.
+
+Two knobs, so four forms:
+
+| | no `K` — lossless | `K` — lossy |
+|---|---|---|
+| **composed** | NFC | NFKC |
+| **decomposed** | NFD | NFKD |
+
+One last property, and it is the one the next section leans on: all four are **idempotent**.
+`NFC(NFC(x)) == NFC(x)`. Normalizing already-normalized text is a no-op, which is why "normalize
+once at the boundary" can be enforced unconditionally rather than tracked as a thing that has or
+has not happened yet to a given string.
+
 ## `identity` does not mean "un-normalized"
 
 This is the most common misreading of the recommendation. `identity` means the *tokenizer* does
@@ -87,9 +143,9 @@ worked implementation.
 
 ## Should you NFKC your ground truth at all?
 
-For OCR, usually **no**. NFKC is lossy in visually meaningful ways: fullwidth digits and letters
-fold to ASCII, ligatures ﬁ→fi, superscripts ²→2. That erases typography the model can actually
-see in the image — you're training it to ignore evidence that's right there.
+For OCR, usually **no**. The compatibility folds from the first section — fullwidth, ligatures,
+superscripts — erase typography the model can actually see in the image. You are training it to
+ignore evidence that is right there in the pixels.
 
 A faithful-transcription system should keep GT free of *compatibility* folding and use
 `identity` — which, per the section above, means NFC-normalized ground truth rather than
@@ -98,8 +154,8 @@ doesn't care — feeding a search index, or an NLP pipeline that normalizes anyw
 
 ## The common mistake: NFKC when you meant NFC
 
-NFKC bundles two separate things: lossy compatibility decomposition, and canonical composition.
-People reach for it when they only need the second.
+NFKC turns both knobs. People reach for it when they only need the first — canonical
+composition — and take the compatibility folding as collateral damage.
 
 If the actual goal is fixing inconsistent combining-mark composition — the Arabic and Devanagari
 NFC/NFD problem from [script considerations](04-scripts.md) — use **NFC**. It's lossless for

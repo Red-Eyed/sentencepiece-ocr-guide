@@ -24,8 +24,8 @@ const STARVED_RATIO: f64 = 0.1;
 /// Run the checks that need both halves.
 pub fn check(corpus: &Counts, artifact: &Artifact, limit: usize) -> Report {
     Report::new(vec![
-        long_lines(corpus, limit, LimitSource::Model),
-        script_coverage(corpus, artifact),
+        long_lines(corpus, limit, LimitSource::Model).about(15),
+        script_coverage(corpus, artifact).about(13),
     ])
 }
 

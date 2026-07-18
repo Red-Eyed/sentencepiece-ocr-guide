@@ -10,6 +10,7 @@
 
 pub mod corpus;
 pub mod crosscheck;
+pub mod format;
 pub mod model;
 pub mod render;
 pub mod report;

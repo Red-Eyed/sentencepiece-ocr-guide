@@ -303,7 +303,9 @@ fn scan_corpus_with(paths: &[PathBuf], config: &scan::Config) -> (Report, scan::
     let combined = scan::combined(&totals);
 
     let mut report = scan::report(&totals, config.axes);
-    report.findings.push(balance::script_balance(&combined));
+    report
+        .findings
+        .push(balance::script_balance(&combined).about(13));
 
     (report, combined)
 }
@@ -317,7 +319,7 @@ fn scan_corpus(paths: &[PathBuf]) -> Report {
     let (mut report, combined) = scan_corpus_with(paths, &config);
     report
         .findings
-        .push(balance::long_lines(&combined, limit, source));
+        .push(balance::long_lines(&combined, limit, source).about(15));
     report
 }
 
