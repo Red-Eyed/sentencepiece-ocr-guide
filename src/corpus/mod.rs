@@ -2,5 +2,6 @@
 
 pub mod axis;
 pub mod canonical;
+pub mod rewrite;
 pub mod scan;
 pub mod source;

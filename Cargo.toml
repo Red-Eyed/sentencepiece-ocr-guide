@@ -48,7 +48,8 @@ thiserror = "2"
 unicode-properties = "0.1.4"
 sentencepiece-model = "0.1.4"
 
-[dev-dependencies]
+# Canonicalizing writes to a scratch file and renames it over the target, so an interrupted run
+# cannot leave a half-written shard where a corpus file used to be.
 tempfile = "3"
 
 # Panicking operations, denied. These live in Clippy's `restriction` group, which is opt-in one

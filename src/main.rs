@@ -15,8 +15,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use spm_ocr::corpus::axis::default_axes;
+use spm_ocr::corpus::canonical::Canonicalizer;
+use spm_ocr::corpus::rewrite::{OnInvalidUtf8, Tally, rewrite_file};
 use spm_ocr::corpus::scan;
-use spm_ocr::corpus::source::{Discovery, discover};
+use spm_ocr::corpus::source::{Discovery, Source, discover};
 use spm_ocr::render;
 use spm_ocr::report::{Report, Severity};
 
@@ -38,6 +40,76 @@ enum Command {
         #[command(flatten)]
         output: OutputArgs,
     },
+
+    /// Rewrite corpus files into canonical form, then re-scan to verify the result.
+    Canonicalize {
+        /// Corpus files or directories (directories are walked recursively).
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+
+        #[command(flatten)]
+        destination: DestinationArgs,
+
+        /// DECIDE axes to apply, e.g. soft_hyphen_line_final. Measure with `corpus` first.
+        #[arg(long)]
+        decide: Vec<String>,
+
+        /// Skip lines that are not valid UTF-8 instead of refusing. Loses data.
+        #[arg(long)]
+        drop_invalid: bool,
+
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+}
+
+/// Where canonicalized output goes.
+///
+/// A clap group rather than two loose flags, so "both" and "neither" are rejected at parse time.
+/// Overwriting the input is never the default: a corpus is expensive to reassemble, and a
+/// canonicalizer configured with the wrong `--decide` axes is not obviously wrong afterwards.
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+struct DestinationArgs {
+    /// Directory to write canonicalized copies into, mirroring the input tree.
+    #[arg(long, value_name = "DIR")]
+    out: Option<PathBuf>,
+
+    /// Overwrite the input files in place.
+    #[arg(long)]
+    in_place: bool,
+}
+
+enum Destination {
+    Out(PathBuf),
+    InPlace,
+}
+
+impl DestinationArgs {
+    fn resolve(&self) -> Destination {
+        match &self.out {
+            Some(directory) => Destination::Out(directory.clone()),
+            // The group above guarantees `--in-place` when `--out` is absent.
+            None => Destination::InPlace,
+        }
+    }
+}
+
+impl Destination {
+    /// Where `source` should be written, creating any directory it needs.
+    fn target(&self, source: &Source) -> Result<PathBuf> {
+        match self {
+            Destination::InPlace => Ok(source.path().to_path_buf()),
+            Destination::Out(directory) => {
+                // Mirror the input tree, so a recursive run does not flatten shards together.
+                let path = directory.join(source.relative());
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                Ok(path)
+            }
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -84,6 +156,20 @@ fn main() -> Result<()> {
             emit(&report, &output);
             std::process::exit(report.exit_code(output.fail_on.into()));
         }
+
+        Command::Canonicalize {
+            paths,
+            destination,
+            decide,
+            drop_invalid,
+            output,
+        } => {
+            configure_threads(output.jobs)?;
+            let report =
+                canonicalize_corpus(&paths, &destination.resolve(), &decide, drop_invalid)?;
+            emit(&report, &output);
+            std::process::exit(report.exit_code(output.fail_on.into()));
+        }
     }
 }
 
@@ -109,6 +195,71 @@ fn scan_corpus(paths: &[PathBuf]) -> Report {
     let axes = default_axes();
     let totals = scan_with_progress(&found, &axes);
     scan::report(&totals, &axes)
+}
+
+/// Rewrite every source, then scan what was written.
+///
+/// The re-scan is the point rather than a courtesy: canonicalizing is only established as having
+/// worked if the output is observed to be clean, and a wrong `--decide` set is not otherwise
+/// visible afterwards.
+fn canonicalize_corpus(
+    paths: &[PathBuf],
+    destination: &Destination,
+    decide: &[String],
+    drop_invalid: bool,
+) -> Result<Report> {
+    step("discovering files…");
+    let found = discover(paths);
+
+    if let Some(note) = found.summarize_skipped(3) {
+        note_line(&note);
+    }
+
+    let canonicalizer = Canonicalizer::new(default_axes(), decide)?;
+    let on_invalid = if drop_invalid {
+        OnInvalidUtf8::Drop
+    } else {
+        OnInvalidUtf8::Refuse
+    };
+
+    let written = rewrite_with_progress(&found, destination, &canonicalizer, on_invalid)?;
+
+    let axes = default_axes();
+    let totals = scan_with_progress(&discover(&written), &axes);
+    Ok(scan::report(&totals, &axes))
+}
+
+fn rewrite_with_progress(
+    found: &Discovery,
+    destination: &Destination,
+    canonicalizer: &Canonicalizer,
+    on_invalid: OnInvalidUtf8,
+) -> Result<Vec<PathBuf>> {
+    // Targets first, and sequentially: this is the step that creates directories, and settling
+    // them up front leaves the parallel pass below writing to distinct, already-existing places.
+    let targets: Vec<PathBuf> = found
+        .sources
+        .iter()
+        .map(|source| destination.target(source))
+        .collect::<Result<_>>()?;
+
+    let bar = byte_bar(found.total_bytes(), "canonicalizing");
+    let tallies: Vec<(String, Tally)> = found
+        .sources
+        .par_iter()
+        .zip(targets.par_iter())
+        .map(|(source, target)| -> Result<(String, Tally)> {
+            let tally = rewrite_file(source, target, canonicalizer, on_invalid)?;
+            bar.inc(source.size_bytes());
+            Ok((source.label(), tally))
+        })
+        .collect::<Result<_>>()?;
+    bar.finish_and_clear();
+
+    for (label, tally) in &tallies {
+        note_line(&format!("{label}: {}", tally.summary()));
+    }
+    Ok(targets)
 }
 
 fn scan_with_progress(found: &Discovery, axes: &[spm_ocr::corpus::axis::Axis]) -> scan::Totals {
