@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 use spm_ocr::corpus::axis::default_axes;
 use spm_ocr::corpus::scan;
@@ -115,7 +116,7 @@ fn scan_with_progress(found: &Discovery, axes: &[spm_ocr::corpus::axis::Axis]) -
 
     let totals: scan::Totals = found
         .sources
-        .iter()
+        .par_iter()
         .map(|source| {
             let counts = scan::scan_source(source, axes).unwrap_or_default();
             bar.inc(source.size_bytes());

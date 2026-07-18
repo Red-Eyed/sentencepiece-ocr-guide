@@ -255,17 +255,6 @@ fn evidence(totals: &Totals, count: impl Fn(&Counts) -> u64) -> Vec<String> {
         .collect()
 }
 
-/// Scan every source, in parallel across sources as well as within each one.
-pub fn scan_all(sources: &[Source], axes: &[Axis]) -> Totals {
-    sources
-        .par_iter()
-        .map(|source| {
-            let counts = scan_source(source, axes).unwrap_or_default();
-            (source.label(), counts)
-        })
-        .collect()
-}
-
 /// Where a scan reads its bytes from — the seam that keeps [`scan_source`] off the filesystem
 /// in tests.
 pub fn scan_bytes(bytes: &[u8], axes: &[Axis]) -> Counts {
