@@ -1,0 +1,57 @@
+[package]
+name = "spm-ocr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Validate a SentencePiece tokenizer for multilingual OCR, and the corpus behind it"
+license = "MIT"
+
+[[bin]]
+name = "spm-ocr"
+path = "src/main.rs"
+
+[lib]
+name = "spm_ocr"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI surface, derived from the types rather than declared twice.
+clap = { version = "4.6", features = ["derive", "wrap_help"] }
+
+# Reports are data first, rendering second: one derive drives the JSON edge.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Work-stealing parallelism. Replaces a hand-rolled pool, an in-flight budget,
+# and a performance-core heuristic with a `par_iter`.
+rayon = "1.12"
+
+# Scanning reads whole files as bytes and never as lines-in-memory, which is what
+# keeps a single newline-free multi-gigabyte file from becoming an allocation.
+memmap2 = "0.9"
+memchr = "2.8"
+
+# Corpus discovery: parallel walk with hidden/ignore handling, plus the same
+# binary-vs-text heuristic git and ripgrep use.
+ignore = "0.4"
+content_inspector = "0.2"
+
+# Unicode facts, from the standard rather than from a hand-tabulated block list.
+unicode-normalization = "0.1"
+unicode-script = "0.5"
+
+# Progress that knows about rayon, so a parallel scan reports honestly.
+indicatif = { version = "0.18", features = ["rayon"] }
+
+anyhow = "1"
+thiserror = "2"
+unicode-properties = "0.1.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+# The scan is the hot path and is dominated by per-line Unicode work; inlining
+# across crate boundaries is worth the compile time here.
+lto = "thin"
+codegen-units = 1

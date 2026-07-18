@@ -18,3 +18,4 @@ wheels/
 *.model
 *.vocab
 corpora/
+/target
