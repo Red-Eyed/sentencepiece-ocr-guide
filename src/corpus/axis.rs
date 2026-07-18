@@ -172,11 +172,16 @@ fn decimal_value(c: char) -> Option<u32> {
     }
 
     let codepoint = c as u32;
-    let mut value = 0;
+    let mut value: u32 = 0;
     // Nine steps at most: a run is ten long, so anything further would be a different run.
+    // `checked_sub` rather than `-`: the guard above means this cannot underflow today, but the
+    // subtraction is the one place here where that is an argument rather than a fact.
     while value < 9 {
-        match char::from_u32(codepoint - value - 1) {
-            Some(previous) if is_digit(previous) => value += 1,
+        let previous = codepoint
+            .checked_sub(value.saturating_add(1))
+            .and_then(char::from_u32);
+        match previous {
+            Some(previous) if is_digit(previous) => value = value.saturating_add(1),
             _ => break,
         }
     }

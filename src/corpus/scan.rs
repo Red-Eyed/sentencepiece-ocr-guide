@@ -120,7 +120,10 @@ fn line_aligned_chunks(data: &[u8]) -> Vec<std::ops::Range<usize>> {
     while start < data.len() {
         let target = (start + CHUNK_BYTES).min(data.len());
         // Extend to the end of the line the target landed in, so no chunk splits a line.
-        let end = match memchr::memchr(b'\n', &data[target..]) {
+        // `get` rather than `[target..]`: the `min` above already bounds it, but that is an
+        // argument the next reader has to reconstruct, and the total form costs nothing.
+        let tail = data.get(target..).unwrap_or_default();
+        let end = match memchr::memchr(b'\n', tail) {
             Some(offset) => target + offset + 1,
             None => data.len(),
         };
@@ -140,9 +143,15 @@ pub fn scan_source(source: &Source, axes: &[Axis]) -> std::io::Result<Counts> {
         return Ok(count_block(bytes, axes));
     }
 
+    // Every range comes from `line_aligned_chunks(bytes)` and so is in bounds; taking the
+    // total form means a future change to the splitter cannot turn that into a panic.
     Ok(line_aligned_chunks(bytes)
         .into_par_iter()
-        .map(|range| count_block(&bytes[range], axes))
+        .map(|range| {
+            bytes
+                .get(range)
+                .map_or_else(Counts::default, |c| count_block(c, axes))
+        })
         .reduce(Counts::default, Counts::merge))
 }
 
@@ -196,9 +205,17 @@ fn axis_finding(axis: &Axis, totals: &Totals, scanned: u64) -> Finding {
         return Finding::passed(check, format!("no variation across {scanned} lines"));
     }
 
-    // A `Preserve` axis reports a measurement, not a defect, so it never fails however large
-    // the count is. Its severity would otherwise make expected text look broken.
-    if axis.action == Action::Preserve {
+    // `Preserve` has no failure severity, and that absence *is* the distinction: such an axis
+    // reports a measurement rather than a defect, so a large count is expected rather than
+    // broken. Modelling it as `None` keeps this match total — the alternative, an early return
+    // plus an "impossible" arm later, is a panic path standing in for a type.
+    let severity = match axis.action {
+        Action::Collapse => Some(Severity::Blocker),
+        Action::Decide => Some(Severity::High),
+        Action::Preserve => None,
+    };
+
+    let Some(severity) = severity else {
         return Finding::passed(
             check,
             format!(
@@ -206,12 +223,6 @@ fn axis_finding(axis: &Axis, totals: &Totals, scanned: u64) -> Finding {
                 axis.rationale
             ),
         );
-    }
-
-    let severity = match axis.action {
-        Action::Collapse => Severity::Blocker,
-        Action::Decide => Severity::High,
-        Action::Preserve => unreachable!("handled above"),
     };
 
     Finding::failed(

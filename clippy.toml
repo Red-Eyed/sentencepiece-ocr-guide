@@ -1,0 +1,7 @@
+# A panicking assertion in a test *is* the failure report, so the panic lints denied in
+# Cargo.toml's [lints.clippy] do not apply there. Without these, every `.unwrap()` in a test
+# would have to be written as a match that cannot fail, which makes tests longer and no safer.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

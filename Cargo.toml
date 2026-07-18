@@ -46,9 +46,39 @@ indicatif = { version = "0.18", features = ["rayon"] }
 anyhow = "1"
 thiserror = "2"
 unicode-properties = "0.1.4"
+sentencepiece-model = "0.1.4"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Panicking operations, denied. These live in Clippy's `restriction` group, which is opt-in one
+# lint at a time by design — enabling the group wholesale would also turn on stylistic lints
+# that contradict each other.
+#
+# The point is not that panics are never acceptable; it is that each one should be a decision
+# with a comment, taken via an explicit `#[allow]`, rather than the path of least resistance.
+# Tests are exempt (see clippy.toml): a panicking assertion there *is* the failure report.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+# A `Result`-returning function that panics has thrown away the channel it was given to report
+# the failure on.
+panic_in_result_fn = "deny"
+
+# Indexing and slicing are real panic paths, so they stay visible. `get()` is the fix.
+indexing_slicing = "warn"
+
+# Deliberately off. Every hit is a `u64` line counter, and a corpus with 2^64 lines does not
+# exist — so the lint's only effect here would be to make counting code read as
+# `n = n.saturating_add(1)` and to leave a dozen permanent warnings, which is how a team learns
+# to ignore the warning channel entirely. The one site where underflow was an argument rather
+# than a fact (`decimal_value`) uses `checked_sub` regardless. Flip to "warn" if arithmetic
+# starts carrying values that come from outside.
+arithmetic_side_effects = "allow"
 
 [profile.release]
 # The scan is the hot path and is dominated by per-line Unicode work; inlining
