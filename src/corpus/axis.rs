@@ -53,8 +53,8 @@ enum Rule {
     Strip(&'static [char]),
     /// Rewrite each listed character to its partner.
     Replace(&'static [(char, char)]),
-    /// NFKC-fold only the characters inside the listed codepoint ranges.
-    NfkcWithin(&'static [RangeInclusive<u32>]),
+    /// NFKC-fold characters inside the listed ranges whose mapping matches [`Expansion`].
+    NfkcWithin(&'static [RangeInclusive<u32>], Expansion),
     /// Compose the whole line.
     Nfc,
     /// Fold non-ASCII decimal digits to their ASCII value.
@@ -63,6 +63,37 @@ enum Rule {
     SoftHyphenLineFinal,
     /// A soft hyphen anywhere but the end was never drawn.
     SoftHyphenMidLine,
+}
+
+/// Which compatibility mappings a fold is allowed to touch.
+///
+/// A compatibility mapping that turns one character into several is a *ligature* — `ﬁ`, or the
+/// Arabic lam-alef `ﻻ` — and the page shows a distinct glyph the model has to reproduce. One
+/// that stays a single character is a presentation variant: an isolated or medial Arabic form
+/// whose shape a renderer derives from context anyway.
+///
+/// The distinction decides whether folding destroys information, which is what separates a
+/// `Collapse` axis from a `Preserve` one. Folding them together is how `canonicalize` came to
+/// rewrite `ﻻ` into two letters with no way back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expansion {
+    /// One character in, one out — a shaping or presentation variant. Safe to fold.
+    Same,
+    /// One character in, several out — a ligature. Reportable, never foldable.
+    Expanding,
+    /// Either. For axes that only ever report.
+    Any,
+}
+
+impl Expansion {
+    fn accepts(self, mapped: &str) -> bool {
+        let expands = mapped.chars().count() > 1;
+        match self {
+            Expansion::Same => !expands,
+            Expansion::Expanding => expands,
+            Expansion::Any => true,
+        }
+    }
 }
 
 /// One way two encodings of the same text can differ.
@@ -86,7 +117,7 @@ impl Axis {
         match &self.rule {
             Rule::Strip(chars) => strip(line, chars),
             Rule::Replace(pairs) => replace(line, pairs),
-            Rule::NfkcWithin(ranges) => nfkc_within(line, ranges),
+            Rule::NfkcWithin(ranges, expansion) => nfkc_within(line, ranges, *expansion),
             Rule::Nfc => compose(line),
             Rule::AsciiDigits => ascii_digits(line),
             Rule::SoftHyphenLineFinal => soft_hyphen_line_final(line),
@@ -102,7 +133,7 @@ impl Axis {
     pub fn failure_mode(&self) -> u8 {
         match self.name {
             "zero_width_joiners" => 3,
-            "arabic_presentation_forms" => 5,
+            "arabic_presentation_forms" | "arabic_ligatures" => 5,
             _ => 4,
         }
     }
@@ -132,7 +163,11 @@ fn replace<'a>(line: &'a str, pairs: &[(char, char)]) -> Cow<'a, str> {
     Cow::Owned(line.chars().map(|c| swap(c).unwrap_or(c)).collect())
 }
 
-fn nfkc_within<'a>(line: &'a str, ranges: &[RangeInclusive<u32>]) -> Cow<'a, str> {
+fn nfkc_within<'a>(
+    line: &'a str,
+    ranges: &[RangeInclusive<u32>],
+    expansion: Expansion,
+) -> Cow<'a, str> {
     let inside = |c: char| ranges.iter().any(|r| r.contains(&(c as u32)));
 
     if !line.chars().any(inside) {
@@ -142,8 +177,13 @@ fn nfkc_within<'a>(line: &'a str, ranges: &[RangeInclusive<u32>]) -> Cow<'a, str
     // no verdict on, which is how a `Preserve` axis would start silently collapsing text.
     let mut folded = String::with_capacity(line.len());
     for c in line.chars() {
-        match inside(c) {
-            true => folded.extend(c.to_string().nfkc()),
+        if !inside(c) {
+            folded.push(c);
+            continue;
+        }
+        let mapped: String = c.to_string().nfkc().collect();
+        match expansion.accepts(&mapped) {
+            true => folded.push_str(&mapped),
             false => folded.push(c),
         }
     }
@@ -270,13 +310,28 @@ pub fn default_axes() -> Vec<Axis> {
             name: "arabic_presentation_forms",
             action: Action::Collapse,
             rationale: "legacy pre-shaped glyphs; shaping is derivable from context",
-            rule: Rule::NfkcWithin(&[0xFB50..=0xFDFF, 0xFE70..=0xFEFF]),
+            rule: Rule::NfkcWithin(&[0xFB50..=0xFDFF, 0xFE70..=0xFEFF], Expansion::Same),
+        },
+        Axis {
+            name: "arabic_ligatures",
+            action: Action::Preserve,
+            // Lam-alef (FEF5–FEFC) and the Allah ligature (FDF2) live in the same blocks as the
+            // shaping forms above, and folding them is not canonicalization: `ﻻ` becomes two
+            // letters and the ligature the page shows is gone for good.
+            rationale: "a ligature is a distinct glyph on the page, like the Latin fi",
+            rule: Rule::NfkcWithin(&[0xFB50..=0xFDFF, 0xFE70..=0xFEFF], Expansion::Expanding),
         },
         Axis {
             name: "hebrew_presentation_forms",
             action: Action::Collapse,
             rationale: "legacy precomposed letter+point glyphs; identical to the logical sequence",
-            rule: Rule::NfkcWithin(&[0xFB1D..=0xFB4F]),
+            rule: Rule::NfkcWithin(&[0xFB1D..=0xFB4F], Expansion::Same),
+        },
+        Axis {
+            name: "hebrew_ligatures",
+            action: Action::Preserve,
+            rationale: "a ligature is a distinct glyph on the page, like the Latin fi",
+            rule: Rule::NfkcWithin(&[0xFB1D..=0xFB4F], Expansion::Expanding),
         },
         Axis {
             name: "nbsp",
@@ -306,7 +361,7 @@ pub fn default_axes() -> Vec<Axis> {
             name: "fullwidth_forms",
             action: Action::Preserve,
             rationale: "different characters with visibly wider glyphs",
-            rule: Rule::NfkcWithin(&[0xFF01..=0xFF60, 0xFFE0..=0xFFE6]),
+            rule: Rule::NfkcWithin(&[0xFF01..=0xFF60, 0xFFE0..=0xFFE6], Expansion::Any),
         },
         Axis {
             name: "ligatures",
@@ -315,7 +370,7 @@ pub fn default_axes() -> Vec<Axis> {
             // Latin (FB00–FB06) and Armenian (FB13–FB17) only. The Hebrew presentation forms
             // sharing this block are a legacy encoding artifact, not typography, and are
             // collapsed by their own axis above.
-            rule: Rule::NfkcWithin(&[0xFB00..=0xFB1C]),
+            rule: Rule::NfkcWithin(&[0xFB00..=0xFB1C], Expansion::Expanding),
         },
         Axis {
             name: "non_ascii_digits",
@@ -443,6 +498,66 @@ mod tests {
     fn fullwidth_forms_are_detected_without_touching_halfwidth() {
         assert!(axis("fullwidth_forms").affects("ＡＢＣ"));
         assert!(!axis("fullwidth_forms").affects("ABC"));
+    }
+
+    #[test]
+    fn a_ligature_is_reported_but_never_folded() {
+        // U+FEFB ARABIC LIGATURE LAM WITH ALEF. Folding it yields two letters and the glyph the
+        // page showed is unrecoverable, so it belongs to a Preserve axis.
+        let line = "x\u{FEFB}y";
+
+        let shaping = axis("arabic_presentation_forms");
+        assert_eq!(
+            shaping.apply(line),
+            line,
+            "a Collapse axis must not lose data"
+        );
+
+        let ligature = axis("arabic_ligatures");
+        assert!(ligature.affects(line), "but it is still reported");
+        assert_eq!(ligature.action, Action::Preserve);
+    }
+
+    #[test]
+    fn a_shaping_form_is_still_folded() {
+        // U+FE8D ARABIC LETTER ALEF ISOLATED FORM maps 1:1 onto the plain letter.
+        let line = "x\u{FE8D}y";
+        assert_eq!(axis("arabic_presentation_forms").apply(line), "x\u{0627}y");
+    }
+
+    #[test]
+    fn the_hebrew_ligature_is_preserved_too() {
+        // U+FB4F HEBREW LIGATURE ALEF LAMED sits in the same block as the letter+point forms.
+        let line = "x\u{FB4F}y";
+        assert_eq!(axis("hebrew_presentation_forms").apply(line), line);
+        assert!(axis("hebrew_ligatures").affects(line));
+    }
+
+    #[test]
+    fn no_collapse_axis_folds_a_ligature() {
+        // The invariant behind the split: a *compatibility* fold may rewrite a character, never
+        // multiply it, because an expansion means a ligature whose glyph would be gone for good.
+        //
+        // `nfc_composition` is exempt, and has to be. Canonical composition legitimately expands
+        // a precomposed character that Unicode lists as a composition exclusion — U+FB1D HEBREW
+        // LETTER YOD WITH HIRIQ is one — and both forms are the same text by definition. Arity
+        // is evidence of loss only when the mapping is a compatibility mapping.
+        for axis in default_axes()
+            .iter()
+            .filter(|a| a.action == Action::Collapse)
+            .filter(|a| matches!(a.rule, Rule::NfkcWithin(..)))
+        {
+            for codepoint in (0xFB00u32..=0xFEFF).filter_map(char::from_u32) {
+                let line = codepoint.to_string();
+                let folded = axis.apply(&line);
+                assert!(
+                    folded.chars().count() <= line.chars().count(),
+                    "{} expanded U+{:04X}",
+                    axis.name,
+                    codepoint as u32
+                );
+            }
+        }
     }
 
     #[test]
