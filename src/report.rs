@@ -133,10 +133,13 @@ impl Finding {
     /// Stamp what this check's failure means. Applied by the runner, not by the check body,
     /// so a check states its verdict once rather than on every return path.
     pub fn graded(mut self, severity: Severity, remedy: Remedy) -> Self {
-        // A pass or a skip is not a defect, so it carries no severity to act on — but the
-        // grade still travels on a failure, including a skipped BLOCKER, which a reader must
-        // not mistake for a clean result.
-        if self.status == Status::Failed {
+        // A skip keeps the grade as well as a failure. What a failure of this check *means* is a
+        // property of the check, not of one run of it, and a skipped BLOCKER is precisely what a
+        // reader must not mistake for a clean result. Only a pass carries nothing to act on.
+        //
+        // This changes what is displayed, never what exits non-zero: `ok`, `worst_severity` and
+        // `remedies` all filter on failure, so a graded skip stays visible without blocking.
+        if self.status != Status::Passed {
             self.severity = severity;
             self.remedy = remedy;
         }
@@ -306,6 +309,26 @@ mod tests {
         let passed = Finding::passed("c", "s").graded(Severity::Blocker, Remedy::FixCorpus);
         assert_eq!(passed.severity, Severity::Info);
         assert_eq!(passed.remedy, Remedy::NotApplicable);
+    }
+
+    #[test]
+    fn a_skip_keeps_the_severity_of_the_check_it_stands_in_for() {
+        // A skipped BLOCKER rendering as `SKIP [info]` is exactly the clean-looking report the
+        // three-status split exists to prevent.
+        let skipped =
+            Finding::skipped("c", "no samples").graded(Severity::Blocker, Remedy::FixCorpus);
+        assert_eq!(skipped.severity, Severity::Blocker);
+        assert_eq!(skipped.remedy, Remedy::FixCorpus);
+    }
+
+    #[test]
+    fn a_graded_skip_still_does_not_fail_the_run() {
+        let report = Report::new(vec![
+            Finding::skipped("c", "no samples").graded(Severity::Blocker, Remedy::FixCorpus),
+        ]);
+        assert!(report.ok(), "a skip is not a failure");
+        assert_eq!(report.exit_code(Severity::Blocker), 0);
+        assert_eq!(report.worst_severity(), Severity::Info);
     }
 
     #[test]

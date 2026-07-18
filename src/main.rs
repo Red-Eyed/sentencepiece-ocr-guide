@@ -7,7 +7,7 @@
 //! announcements and notes go to stderr.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -19,6 +19,7 @@ use spm_ocr::corpus::canonical::Canonicalizer;
 use spm_ocr::corpus::rewrite::{OnInvalidUtf8, Tally, rewrite_file};
 use spm_ocr::corpus::scan;
 use spm_ocr::corpus::source::{Discovery, Source, discover};
+use spm_ocr::model::{artifact, pieces, suite};
 use spm_ocr::render;
 use spm_ocr::report::{Report, Severity};
 
@@ -61,6 +62,54 @@ enum Command {
         #[command(flatten)]
         output: OutputArgs,
     },
+
+    /// Check a trained tokenizer against the guide's checklist.
+    Model {
+        /// The trained `.model` file.
+        model: PathBuf,
+
+        #[command(flatten)]
+        tuning: ModelArgs,
+
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+
+    /// Both checklists at once, corpus findings first.
+    All {
+        /// The trained `.model` file.
+        model: PathBuf,
+
+        /// Corpus files or directories the model was trained on.
+        #[arg(long, required = true)]
+        corpus: Vec<PathBuf>,
+
+        #[command(flatten)]
+        tuning: ModelArgs,
+
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+}
+
+#[derive(clap::Args)]
+struct ModelArgs {
+    /// Longest digit-only piece to allow.
+    #[arg(long, default_value_t = pieces::DEFAULT_MAX_DIGIT_PIECE_LENGTH)]
+    max_digit_piece_length: usize,
+
+    /// Allow a digit fusing with a letter, e.g. `3D`, instead of calling it a cross-script merge.
+    #[arg(long)]
+    allow_digit_letter_pieces: bool,
+}
+
+impl ModelArgs {
+    fn options(&self) -> suite::Options {
+        suite::Options {
+            max_digit_piece_length: self.max_digit_piece_length,
+            digits_are_a_script: !self.allow_digit_letter_pieces,
+        }
+    }
 }
 
 /// Where canonicalized output goes.
@@ -170,7 +219,40 @@ fn main() -> Result<()> {
             emit(&report, &output);
             std::process::exit(report.exit_code(output.fail_on.into()));
         }
+
+        Command::Model {
+            model,
+            tuning,
+            output,
+        } => {
+            let report = check_model(&model, &tuning.options())?;
+            emit(&report, &output);
+            std::process::exit(report.exit_code(output.fail_on.into()));
+        }
+
+        Command::All {
+            model,
+            corpus,
+            tuning,
+            output,
+        } => {
+            configure_threads(output.jobs)?;
+
+            // Corpus first: several model defects originate in the data, and a report that led
+            // with the model would invite a retrain which reproduces the defect exactly.
+            let mut report = scan_corpus(&corpus);
+            report.extend(check_model(&model, &tuning.options())?);
+
+            emit(&report, &output);
+            std::process::exit(report.exit_code(output.fail_on.into()));
+        }
     }
+}
+
+fn check_model(path: &Path, options: &suite::Options) -> Result<Report> {
+    step("reading the model…");
+    let artifact = artifact::load(path)?;
+    Ok(suite::check(&artifact, options))
 }
 
 /// Size rayon's pool once, up front. Left to rayon's own default when unset — its work-stealing
