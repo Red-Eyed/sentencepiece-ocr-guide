@@ -10,8 +10,36 @@ making explicit, because the real invariant is not "always use identity". It's:
 ## What the forms are — two knobs, not four choices
 
 Everything below depends on knowing what the four forms actually do, and the names are opaque
-enough to hide it. The problem they exist to solve is that Unicode allows one rendered string to
-be stored as more than one sequence of code points:
+enough to hide it. They are built from four letters, all of which mean something:
+
+```
+N F K C
+│ │ │ └── Composition — or D, Decomposition
+│ │ └──── compatibility
+│ └────── Form
+└──────── Normalization
+```
+
+The letter that misleads is `C`. It is **not "canonical"** — it is *Composition*, and its
+opposite is `D`. Canonical is what you get when the `K` is *absent*: it is marked by nothing at
+all. [UAX #15](https://www.unicode.org/reports/tr15/) spells out why compatibility got an
+unrelated letter — "a `K` is used to stand for *compatibility* to avoid confusion with the `C`
+standing for *composition*". So the official expansions are:
+
+| | expansion in UAX #15 |
+|---|---|
+| NFD | Canonical Decomposition |
+| NFC | Canonical Decomposition, *followed by* Canonical Composition |
+| NFKD | Compatibility Decomposition |
+| NFKC | Compatibility Decomposition, *followed by* Canonical Composition |
+
+Two things fall out of that table. The composition step is always *canonical* — there is no such
+thing as compatibility composition, so the `K` changes only how text is pulled apart, never how
+it is put back together. And every form decomposes first, including the two whose names end in
+`C`.
+
+The problem all four exist to solve is that Unicode allows one rendered string to be stored as
+more than one sequence of code points:
 
 ```
 'café' == 'café'   ->   False        <- identical on screen, different in memory
@@ -28,13 +56,14 @@ Normalization is picking one spelling and forcing everything into it.
 separate combining marks; NFC squashes them back wherever a single code point exists. The same
 information either way — you can convert back and forth forever.
 
-NFC is not literally "compose", though, and the reason is what makes it the right tool for the
-scripts in [script considerations](04-scripts.md). Give a base two combining marks and they can
-be typed in either order — `q` with a dot above and a dot below is `U+0071 U+0307 U+0323` or
-`U+0071 U+0323 U+0307`, one glyph, two encodings, and composing fixes nothing because there is
-no precomposed code point to compose *to*. So NFC decomposes first, sorts the marks into
-canonical order, then recomposes. Both spellings land on `U+0071 U+0323 U+0307`. That sorting
-step is why NFC is worth anything for Arabic and Devanagari, where stacked marks are the norm.
+The decompose-first step in NFC's expansion is not an implementation detail, and it is what makes
+NFC the right tool for the scripts in [script considerations](04-scripts.md). Give a base two
+combining marks and they can be typed in either order — `q` with a dot above and a dot below is
+`U+0071 U+0307 U+0323` or `U+0071 U+0323 U+0307`, one glyph, two encodings, and composing fixes
+nothing because there is no precomposed code point to compose *to*. Pulling the marks apart is
+what lets them be sorted into canonical order; both spellings then land on `U+0071 U+0323 U+0307`.
+That sorting step is why NFC is worth anything for Arabic and Devanagari, where stacked marks are
+the norm.
 
 **Knob two: the `K`, for compatibility.** A different kind of operation. Without it you are
 saying *these are the same character, encoded differently*. With it you are saying *these are
