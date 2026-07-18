@@ -10,7 +10,7 @@ back out would either crash the encoder or launder corrupt data into a file that
 canonical. Dropping them is possible but must be asked for, because it is data loss.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
 from sentencepiece_ocr_guide.corpus.undecodable import has_undecodable_bytes
@@ -64,7 +64,7 @@ class RewriteRun:
 
 
 def rewrite_lines(
-    lines: Iterator[str] | list[str],
+    lines: Iterable[str],
     canonicalize: Callable[[str], str],
     tally: RewriteTally,
     source: str = "<input>",

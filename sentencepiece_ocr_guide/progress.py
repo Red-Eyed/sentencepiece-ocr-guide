@@ -48,10 +48,20 @@ def byte_progress(total_bytes: int, description: str) -> Iterator[Track]:
 
         yield track
 
-        # Blank lines and newline characters never reach the wrapper, so the tally always lands
-        # a little short of the file size. Close at the total rather than leaving a bar that
-        # stops at 99% on a run that in fact read everything.
-        bar.update(max(0, bar.total - bar.n))
+        # Deliberately after the yield, not in a `finally`: a run that raises part-way through
+        # should leave the bar showing how far it actually got, not a misleading 100%.
+        _snap_to_total(bar)
+
+
+def _snap_to_total(bar: tqdm) -> None:
+    """Finish the bar at its total, absorbing the small undercount from a completed run.
+
+    The total is the size on disk, but what flows past the wrapper is decoded lines with their
+    newlines stripped and blank ones dropped — so a run that read every byte still tallies
+    slightly under. Rather than have every reader re-derive that, close the gap here: a finished
+    scan shows finished, and the imprecision stays a display detail instead of a caveat.
+    """
+    bar.update(max(0, bar.total - bar.n))
 
 
 def line_bytes(line: str) -> int:

@@ -209,7 +209,7 @@ class SpmOcr(BaseSettings, cli_prog_name="spm-ocr", cli_kebab_case=True, populat
 
 def _canonicalize_file(
     source: TextFile,
-    lines: Iterator[str],
+    lines: Iterable[str],
     target: Path,
     canonicalize: Callable[[str], str],
     run: RewriteRun,
