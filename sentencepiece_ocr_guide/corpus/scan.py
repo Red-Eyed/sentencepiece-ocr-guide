@@ -14,9 +14,14 @@ exit identically. The mapping from `Action` to severity is the whole ranking:
 Sources are supplied as iterables of lines, so the core needs no filesystem and a caller can
 stream a file of any size: each source is consumed exactly once, with every axis counted in the
 same pass.
+
+Chunks are counted independently and folded afterwards, which is what makes the scan safe to
+run across threads — no counter is touched by two workers, and the fold is commutative, so a
+parallel run and a sequential one produce identical reports.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 
 from sentencepiece_ocr_guide.checks.result import (
     MAX_EVIDENCE_ITEMS,
@@ -26,10 +31,15 @@ from sentencepiece_ocr_guide.checks.result import (
     Severity,
     Status,
 )
+from sentencepiece_ocr_guide.concurrency import batched, stream_parallel_unordered
 from sentencepiece_ocr_guide.corpus.axes import DEFAULT_AXES, Action, Axis
 from sentencepiece_ocr_guide.corpus.undecodable import has_undecodable_bytes
 
 INVALID_UTF8 = "invalid_utf8"
+
+# Large enough that per-chunk dispatch overhead is negligible, small enough that in-flight
+# chunks stay a bounded slice of memory rather than a fraction of the corpus.
+DEFAULT_CHUNK_LINES = 20_000
 
 _SEVERITY_FOR_ACTION: dict[Action, Severity] = {
     Action.COLLAPSE: Severity.BLOCKER,
@@ -44,74 +54,127 @@ _REMEDY_FOR_ACTION: dict[Action, Remedy] = {
 }
 
 
-class _Tally:
-    """Mutable counters for one scan. Kept private; `scan_corpus` returns immutable results."""
+@dataclass(frozen=True)
+class ChunkCount:
+    """What one chunk of lines contributed, labelled with the source it came from.
 
-    def __init__(self, axes: tuple[Axis, ...]) -> None:
-        self.affected: dict[str, dict[str, int]] = {axis.name: {} for axis in axes}
-        self.scanned: dict[str, int] = {}
-        self.undecodable: dict[str, int] = {}
+    Produced on a worker thread and never mutated, so handing it back to the consumer needs no
+    lock. `_Totals` does the folding.
+    """
 
-    def record(self, axis_name: str, source: str) -> None:
-        counts = self.affected[axis_name]
-        counts[source] = counts.get(source, 0) + 1
+    source: str
+    scanned: int
+    undecodable: int
+    per_axis: Mapping[str, int] = field(default_factory=dict)
 
 
 def scan_corpus(
     sources: Mapping[str, Iterable[str]],
     axes: tuple[Axis, ...] = DEFAULT_AXES,
+    workers: int = 1,
+    chunk_lines: int = DEFAULT_CHUNK_LINES,
 ) -> Report:
-    """Count, per axis and per source, how many lines change under that axis."""
+    """Count, per axis and per source, how many lines change under that axis.
+
+    Work is dispatched in chunks of lines rather than whole sources, so a corpus that is one
+    large file parallelizes just as well as one that is a thousand shards.
+    """
     if not sources:
         return Report(results=(_skipped("no sources supplied"),))
 
-    tally = _count(sources, axes)
-    results = (
-        _invalid_utf8_result(tally),
-        *(_result_for(axis, tally.affected[axis.name], tally.scanned) for axis in axes),
+    chunks = _iter_chunks(sources, chunk_lines)
+    # Completion order, not input order: counts are summed, and addition does not care which
+    # worker finished first. The report stays deterministic because `_Totals` is keyed by source
+    # and rendered in `sources` order.
+    counted = stream_parallel_unordered(
+        lambda chunk: count_chunk(chunk[0], chunk[1], axes), chunks, workers
     )
-    return Report(results=results)
+
+    totals = _Totals(sources)
+    for chunk in counted:
+        totals.add(chunk)
+
+    return Report(results=_results_from(totals, axes))
 
 
-def _count(sources: Mapping[str, Iterable[str]], axes: tuple[Axis, ...]) -> _Tally:
-    """One pass per source, every axis counted together.
+def _iter_chunks(
+    sources: Mapping[str, Iterable[str]], chunk_lines: int
+) -> Iterator[tuple[str, list[str]]]:
+    """Lazily label each batch of lines with the source it came from."""
+    for source, lines in sources.items():
+        for batch in batched(lines, chunk_lines):
+            yield source, batch
+
+
+def count_chunk(source: str, lines: Iterable[str], axes: tuple[Axis, ...]) -> ChunkCount:
+    """Count one batch of lines in a single pass.
 
     The ASCII short-circuit is the difference between scanning a real corpus in seconds and in
     minutes: no axis can fire on a pure-ASCII line, so one C-level test replaces every transform
     for what is typically a large share of the corpus.
     """
-    tally = _Tally(axes)
+    per_axis: dict[str, int] = {}
+    scanned = 0
+    undecodable = 0
 
-    for source, lines in sources.items():
-        tally.scanned[source] = 0
-        tally.undecodable[source] = 0
+    for line in lines:
+        scanned += 1
+        if line.isascii():
+            continue
 
-        for line in lines:
-            tally.scanned[source] += 1
-            if line.isascii():
-                continue
+        if has_undecodable_bytes(line):
+            undecodable += 1
 
-            if has_undecodable_bytes(line):
-                tally.undecodable[source] += 1
+        for axis in axes:
+            if axis.affects(line):
+                per_axis[axis.name] = per_axis.get(axis.name, 0) + 1
 
-            for axis in axes:
-                if axis.affects(line):
-                    tally.record(axis.name, source)
-
-    return tally
+    return ChunkCount(source=source, scanned=scanned, undecodable=undecodable, per_axis=per_axis)
 
 
-def _invalid_utf8_result(tally: _Tally) -> CheckResult:
+class _Totals:
+    """Running totals, accumulated as chunk counts arrive.
+
+    Mutable on purpose. Chunks are counted on worker threads into immutable `ChunkCount`s; this
+    is folded by the consumer alone, on one thread, where copying a frozen record per chunk
+    would buy no safety and cost an allocation for every chunk in the corpus.
+
+    Axis counts are keyed axis-then-source, which is the shape the report wants, so rendering
+    needs no second pass to invert them.
+    """
+
+    def __init__(self, sources: Iterable[str]) -> None:
+        self.scanned: dict[str, int] = dict.fromkeys(sources, 0)
+        self.undecodable: dict[str, int] = dict.fromkeys(self.scanned, 0)
+        self.by_axis: dict[str, dict[str, int]] = {}
+
+    def add(self, chunk: ChunkCount) -> None:
+        self.scanned[chunk.source] += chunk.scanned
+        self.undecodable[chunk.source] += chunk.undecodable
+
+        for axis_name, count in chunk.per_axis.items():
+            per_source = self.by_axis.setdefault(axis_name, {})
+            per_source[chunk.source] = per_source.get(chunk.source, 0) + count
+
+
+def _results_from(totals: _Totals, axes: tuple[Axis, ...]) -> tuple[CheckResult, ...]:
+    return (
+        _invalid_utf8_result(totals.undecodable, totals.scanned),
+        *(_result_for(axis, totals.by_axis.get(axis.name, {}), totals.scanned) for axis in axes),
+    )
+
+
+def _invalid_utf8_result(undecodable: dict[str, int], scanned: dict[str, int]) -> CheckResult:
     """Undecodable bytes are corrupt data, not an encoding preference — canonicalizing cannot
     recover the intended text, so this reports rather than offering a transform."""
-    total = sum(tally.undecodable.values())
-    scanned = sum(tally.scanned.values())
+    total = sum(undecodable.values())
+    total_scanned = sum(scanned.values())
 
     if total == 0:
         return CheckResult(
             check=INVALID_UTF8,
             status=Status.PASSED,
-            summary=f"every one of {scanned:,} lines decoded as valid UTF-8",
+            summary=f"every one of {total_scanned:,} lines decoded as valid UTF-8",
             severity=Severity.BLOCKER,
             remedy=Remedy.FIX_CORPUS,
         )
@@ -120,10 +183,10 @@ def _invalid_utf8_result(tally: _Tally) -> CheckResult:
         check=INVALID_UTF8,
         status=Status.FAILED,
         summary=(
-            f"{total:,} of {scanned:,} lines contain bytes that are not valid UTF-8 — "
+            f"{total:,} of {total_scanned:,} lines contain bytes that are not valid UTF-8 — "
             "fix the extractor; these bytes cannot be recovered by normalizing"
         ),
-        evidence=_evidence(tally.undecodable, tally.scanned),
+        evidence=_evidence(undecodable, scanned),
         severity=Severity.BLOCKER,
         remedy=Remedy.FIX_CORPUS,
     )
@@ -157,8 +220,13 @@ def _summary(axis: Axis, total: int, scanned: int) -> str:
 
 
 def _evidence(per_source: dict[str, int], scanned: dict[str, int]) -> tuple[str, ...]:
-    """Worst source first — variation is usually one broken extractor, not a diffuse issue."""
-    ranked = sorted(per_source.items(), key=lambda item: item[1], reverse=True)
+    """Worst source first — variation is usually one broken extractor, not a diffuse issue.
+
+    Ties break on source name. Counts arrive in worker-completion order, so ranking on count
+    alone would let two equally-affected sources swap places between runs, and a report that
+    changes with `--jobs` is a report you cannot diff.
+    """
+    ranked = sorted(per_source.items(), key=lambda item: (-item[1], item[0]))
     return tuple(
         f"{source}: {count:,} / {scanned[source]:,} lines"
         for source, count in ranked[:MAX_EVIDENCE_ITEMS]

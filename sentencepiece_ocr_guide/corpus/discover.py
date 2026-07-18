@@ -13,9 +13,11 @@ second-guessing it would make the tool argue with its operator.
 """
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from sentencepiece_ocr_guide.concurrency import run_parallel
 
 SNIFF_BYTES = 8192
 
@@ -59,41 +61,47 @@ class Discovery:
         return not self.files
 
 
-def discover_text_files(roots: Sequence[Path]) -> Discovery:
+def discover_text_files(roots: Sequence[Path], workers: int = 1) -> Discovery:
     """Expand `roots` into text files, walking any directory recursively.
 
-    Results are sorted so a report over the same tree is byte-identical between runs.
+    Results are sorted so a report over the same tree is byte-identical between runs, whatever
+    order the sniffing threads finished in.
     """
     files: list[TextFile] = []
     skipped: list[Skipped] = []
+    candidates: list[TextFile] = []
 
     for root in roots:
         if root.is_dir():
-            _walk(root, files, skipped)
+            candidates.extend(_candidates_under(root))
         elif root.exists():
             files.append(TextFile(path=root, root=root.parent))
         else:
             skipped.append(Skipped(path=root, reason="does not exist"))
+
+    # Sniffing opens and reads every candidate, so it is I/O-bound and worth spreading out.
+    for candidate, reason in zip(
+        candidates, run_parallel(_rejection, [found.path for found in candidates], workers)
+    ):
+        if reason is None:
+            files.append(candidate)
+        else:
+            skipped.append(Skipped(path=candidate.path, reason=reason))
 
     files.sort(key=lambda found: found.path)
     skipped.sort(key=lambda entry: entry.path)
     return Discovery(files=tuple(files), skipped=tuple(skipped))
 
 
-def _walk(root: Path, files: list[TextFile], skipped: list[Skipped]) -> None:
+def _candidates_under(root: Path) -> Iterator[TextFile]:
+    """Every non-hidden file under `root`, before any content sniffing."""
     # `followlinks=False` keeps a symlinked parent directory from causing an infinite walk.
     for directory, subdirectories, names in os.walk(root, followlinks=False):
         subdirectories[:] = sorted(name for name in subdirectories if not name.startswith("."))
 
         for name in sorted(names):
-            if name.startswith("."):
-                continue
-            path = Path(directory) / name
-            reason = _rejection(path)
-            if reason is None:
-                files.append(TextFile(path=path, root=root))
-            else:
-                skipped.append(Skipped(path=path, reason=reason))
+            if not name.startswith("."):
+                yield TextFile(path=Path(directory) / name, root=root)
 
 
 def _rejection(path: Path) -> str | None:

@@ -93,6 +93,12 @@ Directories are walked recursively. Binary files are skipped by content, not ext
 trained `.model` sitting beside your corpus is the usual reason that matters — and what was
 skipped is always reported.
 
+The corpus scan is **threaded by default**, dispatching chunks of lines so a single large file
+parallelizes as well as many shards. The project targets free-threaded CPython (`.python-version`
+pins `3.14t`), where threads run Python genuinely in parallel; on a GIL build everything still
+works and simply stops being faster. `--jobs` overrides the default, and the report is identical
+at any setting.
+
 Findings are ranked worst-first and carry both a severity and a remedy:
 
 ```

@@ -53,6 +53,31 @@ It is idempotent, which is what makes `line == canonicalize(line)` a valid asser
 corpus-write time. That assertion is the point: it moves the guarantee from a documented step
 that every pipeline is *supposed* to call into an invariant that fails loudly.
 
+## Parallelism
+
+Scanning is threaded by default. `--jobs` overrides it; `--jobs 1` forces serial.
+
+Work is dispatched in **chunks of lines**, not whole files, so a corpus that is one large file
+parallelizes as well as one that is a thousand shards. Chunk counts are summed, and addition
+does not care which worker finished first, so results are consumed in completion order — no fast
+worker waits on a slow one.
+
+The report is identical at any `--jobs`, and that is asserted rather than assumed
+(`tests/test_concurrency.py`). It takes one deliberate detail: evidence lines rank by count and
+then **by source name**, because counts arrive in completion order and ties would otherwise swap
+places between runs.
+
+Measured on an Apple M5 (4 performance + 6 efficiency cores), one 400k-line file:
+
+| jobs | 1 | 2 | 3 | 4 | 5 | 6 | 8 |
+|---|---|---|---|---|---|---|---|
+| speedup | 1.00x | 1.46x | 1.83x | **2.08x** | 1.00x | 1.07x | 1.11x |
+
+Throughput climbs to the performance-core count and then falls off a cliff back to the serial
+rate — at the same place for chunk sizes from 1k to 20k lines. So `default_workers()` uses the
+*performance*-core count where the platform reports it, not `cpu_count() - 1`: on this machine
+asking for 9 threads is half the speed of asking for 4.
+
 ## Pointing at a directory
 
 Both commands take files or directories; a directory is walked recursively.

@@ -20,6 +20,7 @@ from sentencepiece_ocr_guide.adapters.spm import SentencePieceTokenizer
 from sentencepiece_ocr_guide.checks.result import Report, Severity
 from sentencepiece_ocr_guide.checks.runner import run_checks
 from sentencepiece_ocr_guide.checks.suite import standard_suite
+from sentencepiece_ocr_guide.concurrency import default_workers
 from sentencepiece_ocr_guide.corpus.canonicalize import canonicalizer
 from sentencepiece_ocr_guide.corpus.discover import (
     Discovery,
@@ -43,6 +44,10 @@ class _Output(BaseModel):
         default=Severity.HIGH,
         description="Exit non-zero when a failure reaches this severity.",
     )
+    jobs: int = Field(
+        default_factory=default_workers,
+        description="Worker threads. Defaults to one fewer than the machine's cores.",
+    )
 
     def emit(self, report: Report) -> None:
         print(as_json(report) if self.json_output else as_text(report))
@@ -56,7 +61,7 @@ class CorpusChecklist(_Output):
     )
 
     def cli_cmd(self) -> None:
-        report = _scan(self.files)
+        report = _scan(self.files, self.jobs)
         self.emit(report)
         raise SystemExit(exit_code(report, self.fail_on))
 
@@ -113,7 +118,7 @@ class BothChecklists(ModelChecklist):
     corpus: list[Path] = Field(default_factory=list, description="Corpus files to scan first")
 
     def cli_cmd(self) -> None:
-        corpus_report = _scan(self.corpus)
+        corpus_report = _scan(self.corpus, self.jobs)
         model_report = self.run_checklist()
         combined = Report(results=corpus_report.results + model_report.results)
 
@@ -151,7 +156,7 @@ class CanonicalizeCorpus(_Output):
         canonicalize = canonicalizer(decide=tuple(self.decide))
         run = RewriteRun()
 
-        discovery = _discover(self.files)
+        discovery = _discover(self.files, self.jobs)
         written = [
             _canonicalize_file(found, destination(found), canonicalize, run, self.drop_invalid)
             for found in discovery.files
@@ -161,7 +166,7 @@ class CanonicalizeCorpus(_Output):
             print(f"{source}: {tally.summary()}")
 
         # Re-scan the output: the invariant is only established if it is observed.
-        report = _scan(written)
+        report = _scan(written, self.jobs)
         print()
         self.emit(report)
         raise SystemExit(exit_code(report, self.fail_on))
@@ -221,18 +226,21 @@ def _canonicalize_file(
     return target
 
 
-def _discover(paths: list[Path]) -> Discovery:
+def _discover(paths: list[Path], jobs: int) -> Discovery:
     """Expand paths to text files, reporting what was passed over."""
-    discovery = discover_text_files(paths)
+    discovery = discover_text_files(paths, workers=jobs)
     note = summarize(discovery.skipped)
     if note:
         print(note)
     return discovery
 
 
-def _scan(paths: list[Path]) -> Report:
-    discovery = _discover(paths)
-    return scan_corpus({found.label: _stream_lines(found.path) for found in discovery.files})
+def _scan(paths: list[Path], jobs: int) -> Report:
+    discovery = _discover(paths, jobs)
+    return scan_corpus(
+        {found.label: _stream_lines(found.path) for found in discovery.files},
+        workers=jobs,
+    )
 
 
 def _stream_lines(path: Path) -> Iterator[str]:

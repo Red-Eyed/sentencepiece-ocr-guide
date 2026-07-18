@@ -36,7 +36,7 @@ line-length = 100
 select = ["E", "F", "I", "UP"]
 
 [tool.pyrefly]
-python-version = "3.11.0"
+python-version = "3.14.0"
 # Point at the uv venv so pyrefly finds installed packages
 python-interpreter-path = ".venv/bin/python"
 project-includes = ["sentencepiece_ocr_guide", "tests"]
