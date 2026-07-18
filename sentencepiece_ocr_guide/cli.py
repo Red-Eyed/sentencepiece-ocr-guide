@@ -21,6 +21,12 @@ from sentencepiece_ocr_guide.checks.result import Report, Severity
 from sentencepiece_ocr_guide.checks.runner import run_checks
 from sentencepiece_ocr_guide.checks.suite import standard_suite
 from sentencepiece_ocr_guide.corpus.canonicalize import canonicalizer
+from sentencepiece_ocr_guide.corpus.discover import (
+    Discovery,
+    TextFile,
+    discover_text_files,
+    summarize,
+)
 from sentencepiece_ocr_guide.corpus.rewrite import RewriteRun, UndecodableLineError, rewrite_lines
 from sentencepiece_ocr_guide.corpus.scan import scan_corpus
 from sentencepiece_ocr_guide.report import as_json, as_text, exit_code
@@ -45,7 +51,9 @@ class _Output(BaseModel):
 class CorpusChecklist(_Output):
     """Scan corpus files for encoding axes that vary between sources."""
 
-    files: CliPositionalArg[list[Path]] = Field(description="Corpus text files, one line each")
+    files: CliPositionalArg[list[Path]] = Field(
+        description="Corpus files or directories (directories walked recursively for text files)"
+    )
 
     def cli_cmd(self) -> None:
         report = _scan(self.files)
@@ -120,7 +128,9 @@ class CanonicalizeCorpus(_Output):
     canonicalizer configured with the wrong `--decide` axes is not obviously wrong afterwards.
     """
 
-    files: CliPositionalArg[list[Path]] = Field(description="Corpus text files to canonicalize")
+    files: CliPositionalArg[list[Path]] = Field(
+        description="Corpus files or directories to canonicalize (directories walked recursively)"
+    )
     out: Path | None = Field(
         default=None, description="Directory to write canonicalized copies into"
     )
@@ -141,9 +151,10 @@ class CanonicalizeCorpus(_Output):
         canonicalize = canonicalizer(decide=tuple(self.decide))
         run = RewriteRun()
 
+        discovery = _discover(self.files)
         written = [
-            _canonicalize_file(path, destination(path), canonicalize, run, self.drop_invalid)
-            for path in self.files
+            _canonicalize_file(found, destination(found), canonicalize, run, self.drop_invalid)
+            for found in discovery.files
         ]
 
         for source, tally in run.per_source.items():
@@ -155,16 +166,22 @@ class CanonicalizeCorpus(_Output):
         self.emit(report)
         raise SystemExit(exit_code(report, self.fail_on))
 
-    def _destination(self) -> Callable[[Path], Path]:
+    def _destination(self) -> Callable[[TextFile], Path]:
         if self.in_place == (self.out is not None):
             raise SystemExit("error: pass exactly one of --out DIR or --in-place")
         if self.in_place:
-            return lambda path: path
+            return lambda found: found.path
 
         out = self.out
         assert out is not None  # guarded above
-        out.mkdir(parents=True, exist_ok=True)
-        return lambda path: out / path.name
+
+        def target(found: TextFile) -> Path:
+            """Mirror the input tree, so a recursive run does not flatten shards together."""
+            path = out / found.relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+
+        return target
 
 
 class SpmOcr(BaseSettings, cli_prog_name="spm-ocr", cli_kebab_case=True, populate_by_name=True):
@@ -180,20 +197,20 @@ class SpmOcr(BaseSettings, cli_prog_name="spm-ocr", cli_kebab_case=True, populat
 
 
 def _canonicalize_file(
-    source: Path,
+    source: TextFile,
     target: Path,
     canonicalize: Callable[[str], str],
     run: RewriteRun,
     drop_invalid: bool,
 ) -> Path:
     """Write through a temporary file so a rejected line leaves no partial output behind."""
-    tally = run.tally_for(source.name)
+    tally = run.tally_for(source.label)
     temporary = target.with_name(target.name + ".canonicalizing")
 
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for line in rewrite_lines(
-                _stream_lines(source), canonicalize, tally, source.name, drop_invalid
+                _stream_lines(source.path), canonicalize, tally, source.label, drop_invalid
             ):
                 handle.write(line + "\n")
     except (UndecodableLineError, OSError) as error:
@@ -204,8 +221,18 @@ def _canonicalize_file(
     return target
 
 
-def _scan(files: list[Path]) -> Report:
-    return scan_corpus({path.name: _stream_lines(path) for path in files})
+def _discover(paths: list[Path]) -> Discovery:
+    """Expand paths to text files, reporting what was passed over."""
+    discovery = discover_text_files(paths)
+    note = summarize(discovery.skipped)
+    if note:
+        print(note)
+    return discovery
+
+
+def _scan(paths: list[Path]) -> Report:
+    discovery = _discover(paths)
+    return scan_corpus({found.label: _stream_lines(found.path) for found in discovery.files})
 
 
 def _stream_lines(path: Path) -> Iterator[str]:

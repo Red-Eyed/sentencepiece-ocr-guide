@@ -53,6 +53,30 @@ It is idempotent, which is what makes `line == canonicalize(line)` a valid asser
 corpus-write time. That assertion is the point: it moves the guarantee from a documented step
 that every pipeline is *supposed* to call into an invariant that fails loudly.
 
+## Pointing at a directory
+
+Both commands take files or directories; a directory is walked recursively.
+
+```
+spm-ocr corpus       corpus/
+spm-ocr canonicalize corpus/ --out canonical/     # output mirrors the input tree
+```
+
+A corpus directory is rarely only corpus, so [`discover.py`](discover.py) filters it:
+
+- **Binary files are skipped**, detected by a NUL byte in the first 8 KB — the `git`/`grep`
+  heuristic. It beats an extension allowlist because corpus shards are often extensionless, and
+  beats trusting the extension because a `.txt` can still be binary. Trained `.model` and
+  `.vocab` artifacts living beside the corpus are the common case.
+- **Hidden files and directories are skipped**, so `.git` and `.DS_Store` never appear.
+- **A file named explicitly is always accepted**, binary or not. An explicit path is a decision,
+  and second-guessing it would make the tool argue with its operator.
+- **Skips are reported**, not silent: `skipped 2: corpus.tar.gz (binary), ocr.model (binary)`.
+  An unexplained file count is how you end up scanning a quarter of your corpus.
+
+Sources are labelled by full path rather than filename, because shard names repeat across
+subdirectories and two `latin.txt` files must not collapse into one line of the report.
+
 ## Rewriting a corpus
 
 `spm-ocr canonicalize` applies the above to files and then re-scans its own output, so the
