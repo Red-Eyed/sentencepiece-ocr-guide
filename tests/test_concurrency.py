@@ -7,18 +7,12 @@ one, because you could no longer trust either.
 
 import os
 import threading
-import time
 import unicodedata
 
 import pytest
 
-from sentencepiece_ocr_guide.concurrency import (
-    batched,
-    default_workers,
-    run_parallel,
-    stream_parallel_unordered,
-)
-from sentencepiece_ocr_guide.corpus.scan import scan_corpus
+from sentencepiece_ocr_guide.concurrency import default_workers, run_parallel
+from sentencepiece_ocr_guide.corpus.scan import _counted, count_chunk, scan_corpus
 
 DECOMPOSED = unicodedata.normalize("NFD", "café")
 
@@ -40,33 +34,37 @@ def test_run_parallel_preserves_input_order(workers: int) -> None:
     assert run_parallel(lambda n: n * 2, range(50), workers) == [n * 2 for n in range(50)]
 
 
-def test_stream_parallel_does_not_exhaust_its_input_up_front() -> None:
-    """`list(items)` here would pull a whole corpus into memory; the point is that it does not."""
-    consumed = []
+def test_counting_does_not_read_the_corpus_up_front() -> None:
+    """Draining the reader ahead of the fold would pull a whole corpus into memory.
+
+    `buffersize` is the only thing stopping `Executor.map` from doing exactly that, so this
+    pulls a single count and asserts the reader is still a bounded distance in front of it.
+    """
+    read: list[str] = []
 
     def counting_source():
-        for n in range(100):
-            consumed.append(n)
-            yield n
+        for n in range(4_000):
+            read.append(str(n))
+            yield str(n)
 
-    results = stream_parallel_unordered(lambda n: n, counting_source(), workers=4, in_flight=8)
-    next(results)
+    counted = _counted({"a": counting_source()}, (), workers=4, chunk_lines=1)
+    next(counted)
 
-    assert len(consumed) < 100, "input was fully consumed before the first result"
+    assert len(read) < 4_000, "the whole corpus was buffered before the first count came back"
 
 
-@pytest.mark.parametrize("workers", [1, 4])
-def test_exceptions_propagate_rather_than_being_swallowed(workers: int) -> None:
-    def explode(n: int) -> int:
-        if n == 7:
-            raise ValueError("boom")
-        return n
+def test_scan_exceptions_propagate_rather_than_being_swallowed() -> None:
+    """A failure in the work means the work is broken — a bug to surface, not a count to report."""
+
+    def explode():
+        yield "fine"
+        raise ValueError("boom")
 
     with pytest.raises(ValueError, match="boom"):
-        list(stream_parallel_unordered(explode, range(20), workers))
+        scan_corpus({"a": explode()}, workers=4, chunk_lines=1)
 
 
-def test_stream_parallel_actually_uses_multiple_threads() -> None:
+def test_counting_actually_uses_multiple_threads() -> None:
     seen: set[int] = set()
     barrier = threading.Barrier(4, timeout=5)
 
@@ -75,21 +73,16 @@ def test_stream_parallel_actually_uses_multiple_threads() -> None:
         seen.add(threading.get_ident())
         return 0
 
-    list(stream_parallel_unordered(record, range(8), workers=4, in_flight=8))
+    run_parallel(record, range(8), workers=4)
 
     assert len(seen) >= 2
 
 
-@pytest.mark.parametrize(("size", "expected"), [(1, 5), (2, 3), (5, 1), (10, 1)])
-def test_batched_groups_without_losing_items(size: int, expected: int) -> None:
-    batches = list(batched(range(5), size))
+def test_count_chunk_is_indifferent_to_batch_type() -> None:
+    """Chunks arrive from `itertools.batched` as tuples; the counter must not assume lists."""
+    lines = (DECOMPOSED, "clean ascii")
 
-    assert len(batches) == expected
-    assert [item for batch in batches for item in batch] == list(range(5))
-
-
-def test_batched_on_empty_input_yields_nothing() -> None:
-    assert list(batched([], 10)) == []
+    assert count_chunk("a", lines, ()).scanned == count_chunk("a", list(lines), ()).scanned
 
 
 class TestScanIsUnaffectedByParallelism:
@@ -126,44 +119,9 @@ class TestScanIsUnaffectedByParallelism:
         assert with_empty.model_dump() == without.model_dump()
 
 
-class TestUnorderedStreaming:
-    """Used by the scan, where chunk counts are summed and order is irrelevant."""
-
-    def test_returns_every_result(self) -> None:
-        results = stream_parallel_unordered(lambda n: n * 2, range(50), workers=4)
-
-        assert sorted(results) == sorted(n * 2 for n in range(50))
-
-    def test_does_not_stall_behind_one_slow_item(self) -> None:
-        """Head-of-line blocking is what makes ordered yielding collapse on slow cores.
-
-        Asserting on result *order* rather than elapsed time: the slow item is submitted first,
-        so an ordered consumer would have to emit it first. Here it must come out last.
-        """
-
-        def uneven(n: int) -> int:
-            time.sleep(0.2 if n == 0 else 0.0)
-            return n
-
-        results = list(stream_parallel_unordered(uneven, range(8), workers=4, in_flight=8))
-
-        assert results[0] != 0, "the slow item blocked the fast ones behind it"
-        assert results[-1] == 0
-        assert sorted(results) == list(range(8))
-
-    def test_exceptions_still_propagate(self) -> None:
-        def explode(n: int) -> int:
-            if n == 5:
-                raise ValueError("boom")
-            return n
-
-        with pytest.raises(ValueError, match="boom"):
-            list(stream_parallel_unordered(explode, range(20), workers=4))
-
-
 def test_evidence_order_is_stable_when_sources_tie() -> None:
-    """Counts arrive in completion order, so ranking on count alone would let equal sources
-    swap places between runs — and a report that changes with --jobs cannot be diffed."""
+    """Ranking equal sources on count alone would leave their order down to how the counts
+    folded — and a report that changes with --jobs cannot be diffed."""
     identical = [DECOMPOSED] * 200
     sources = {name: list(identical) for name in ("d", "c", "b", "a")}
 

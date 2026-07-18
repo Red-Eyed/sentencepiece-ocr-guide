@@ -22,6 +22,7 @@ parallel run and a sequential one produce identical reports.
 
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
+from itertools import batched
 
 from sentencepiece_ocr_guide.checks.result import (
     MAX_EVIDENCE_ITEMS,
@@ -31,7 +32,7 @@ from sentencepiece_ocr_guide.checks.result import (
     Severity,
     Status,
 )
-from sentencepiece_ocr_guide.concurrency import batched, stream_parallel_unordered
+from sentencepiece_ocr_guide.concurrency import IN_FLIGHT_PER_WORKER, cancelling_pool
 from sentencepiece_ocr_guide.corpus.axes import DEFAULT_AXES, Action, Axis
 from sentencepiece_ocr_guide.corpus.undecodable import has_undecodable_bytes
 
@@ -82,25 +83,49 @@ def scan_corpus(
     if not sources:
         return Report(results=(_skipped("no sources supplied"),))
 
-    chunks = _iter_chunks(sources, chunk_lines)
-    # Completion order, not input order: counts are summed, and addition does not care which
-    # worker finished first. The report stays deterministic because `_Totals` is keyed by source
-    # and rendered in `sources` order.
-    counted = stream_parallel_unordered(
-        lambda chunk: count_chunk(chunk[0], chunk[1], axes), chunks, workers
-    )
-
     totals = _Totals(sources)
-    for chunk in counted:
-        totals.add(chunk)
+    for counts in _counted(sources, axes, workers, chunk_lines):
+        totals.add(counts)
 
     return Report(results=_results_from(totals, axes))
 
 
+def _counted(
+    sources: Mapping[str, Iterable[str]],
+    axes: tuple[Axis, ...],
+    workers: int,
+    chunk_lines: int,
+) -> Iterator[ChunkCount]:
+    """Map `count_chunk` over the corpus, on a thread pool when asked for one.
+
+    `buffersize` is what keeps this a stream: at most that many chunks are pulled from the reader
+    ahead of the fold, so memory stays bounded by the chunk size no matter how large the corpus
+    is. Without it `map` would drain the whole reader up front and pull a multi-gigabyte corpus
+    into memory.
+    """
+    chunks = _iter_chunks(sources, chunk_lines)
+
+    if workers <= 1:
+        for source, lines in chunks:
+            yield count_chunk(source, lines, axes)
+        return
+
+    with cancelling_pool(workers) as pool:
+        yield from pool.map(
+            lambda chunk: count_chunk(chunk[0], chunk[1], axes),
+            chunks,
+            buffersize=workers * IN_FLIGHT_PER_WORKER,
+        )
+
+
 def _iter_chunks(
     sources: Mapping[str, Iterable[str]], chunk_lines: int
-) -> Iterator[tuple[str, list[str]]]:
-    """Lazily label each batch of lines with the source it came from."""
+) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """Lazily label each batch of lines with the source it came from.
+
+    Batching is what lets a *single* large file parallelize. Dispatching per source would leave
+    one worker doing everything when the corpus is one big file, which is the common case.
+    """
     for source, lines in sources.items():
         for batch in batched(lines, chunk_lines):
             yield source, batch
@@ -222,9 +247,9 @@ def _summary(axis: Axis, total: int, scanned: int) -> str:
 def _evidence(per_source: dict[str, int], scanned: dict[str, int]) -> tuple[str, ...]:
     """Worst source first — variation is usually one broken extractor, not a diffuse issue.
 
-    Ties break on source name. Counts arrive in worker-completion order, so ranking on count
-    alone would let two equally-affected sources swap places between runs, and a report that
-    changes with `--jobs` is a report you cannot diff.
+    Ties break on source name, not on arrival: ranking two equally-affected sources by count
+    alone leaves their order down to how the counts happened to fold, and a report that changes
+    with `--jobs` is a report you cannot diff.
     """
     ranked = sorted(per_source.items(), key=lambda item: (-item[1], item[0]))
     return tuple(

@@ -28,9 +28,8 @@ than asking for four.
 import os
 import subprocess
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from itertools import islice
 from typing import TypeVar
 
 Item = TypeVar("Item")
@@ -116,55 +115,3 @@ def run_parallel(
 
     with cancelling_pool(min(workers, len(materialized))) as pool:
         return list(pool.map(work, materialized))
-
-
-def stream_parallel_unordered(
-    work: Callable[[Item], Result],
-    items: Iterable[Item],
-    workers: int,
-    in_flight: int | None = None,
-) -> Iterator[Result]:
-    """Like `run_parallel`, but never materializes the input, and yields as results arrive.
-
-    `run_parallel` is fine for a known-small list such as the files in a directory. It is the
-    wrong shape for corpus lines: `list(items)` there would pull an entire multi-gigabyte corpus
-    into memory, defeating the streaming reader that feeds it. At most `in_flight` units of work
-    are queued at once, so memory stays bounded by the chunk size regardless of corpus size.
-
-    **Results arrive in completion order, not input order.** Use it only where the caller
-    combines them commutatively — summing counts, for instance. Yielding in input order would
-    make a fast worker wait on whichever unit happens to be slowest, and nothing here needs it.
-
-    (CPython 3.14 added a `buffersize` argument to `Executor.map` that bounds the input the same
-    way. This is written out longhand so the module keeps working on older interpreters, where
-    it simply stops being faster.)
-    """
-    if workers <= 1:
-        for item in items:
-            yield work(item)
-        return
-
-    limit = in_flight or workers * IN_FLIGHT_PER_WORKER
-    pending: set[Future[Result]] = set()
-
-    with cancelling_pool(workers) as pool:
-        for item in items:
-            pending.add(pool.submit(work, item))
-            if len(pending) >= limit:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    yield future.result()
-
-        for future in as_completed(pending):
-            yield future.result()
-
-
-def batched(items: Iterable[Item], size: int) -> Iterator[list[Item]]:
-    """Group a stream into fixed-size lists.
-
-    Chunking is what lets a *single* large file parallelize. Dispatching per source would leave
-    one worker doing everything when the corpus is one big file, which is the common case.
-    """
-    iterator = iter(items)
-    while batch := list(islice(iterator, size)):
-        yield batch
