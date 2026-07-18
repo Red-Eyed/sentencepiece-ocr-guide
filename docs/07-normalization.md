@@ -14,7 +14,8 @@ enough to hide it. The problem they exist to solve is that Unicode allows one re
 be stored as more than one sequence of code points:
 
 ```
-'café' == 'café'   ->   False        <- identical on screen, different in memory
+'café' == 'café'   ->   False        <- identical on screen, different in memory
+ ^NFC      ^NFD
 
 U+0063 U+0061 U+0066 U+00E9          NFC: 4 code points, "e with acute"
 U+0063 U+0061 U+0066 U+0065 U+0301   NFD: 5 code points, "e" + "combining acute"

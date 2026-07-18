@@ -5,15 +5,14 @@
 //! script the trainer allocated almost no pieces to has learned no merges, so its text can only
 //! come out as short pieces — which is what high fertility *is*.
 //!
-//! This is the weaker half of that signal and is reported rather than graded. What counts as a
-//! fair share is not proportional: CJK needs thousands of pieces to reach the same fluency Latin
-//! reaches with hundreds. Comparing the split against the corpus that produced it is the part
-//! that can be judged, and that lives in [`crate::crosscheck`].
+//! The split on its own is not a finding. "Latin holds half the vocabulary" is unactionable
+//! without knowing what the corpus asked for, and once the corpus is present
+//! [`crate::crosscheck::script_coverage`] answers the same question with a verdict. So this
+//! module supplies the tally and states no opinion.
 
 use std::collections::BTreeMap;
 
 use crate::model::artifact::{Vocabulary, surface};
-use crate::report::{Finding, MAX_EVIDENCE, Remedy, Severity};
 use crate::writing::writing_of;
 
 /// Pieces attributed to each writing system.
@@ -40,43 +39,10 @@ pub fn pieces_per_script(vocabulary: &Vocabulary) -> BTreeMap<&'static str, u64>
     per_script
 }
 
-/// The vocabulary split, reported for the record.
-pub fn vocabulary_budget(vocabulary: &Vocabulary) -> Finding {
-    let per_script = pieces_per_script(vocabulary);
-    let total: u64 = per_script.values().sum();
-
-    if total == 0 {
-        return Finding::skipped(
-            "vocabulary_budget",
-            "no pieces belong to any writing system",
-        )
-        .graded(Severity::Medium, Remedy::FixCorpus);
-    }
-
-    let mut ranked: Vec<(&str, u64)> = per_script.iter().map(|(n, c)| (*n, *c)).collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-
-    let shares: Vec<String> = ranked
-        .iter()
-        .take(MAX_EVIDENCE)
-        .map(|(name, count)| {
-            let share = 100.0 * *count as f64 / total as f64;
-            format!("{name}: {share:.1}% ({count} pieces)")
-        })
-        .collect();
-
-    Finding::passed(
-        "vocabulary_budget",
-        format!("{} writing systems across the vocabulary", ranked.len()),
-    )
-    .with_evidence(shares)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::artifact::{Kind, Piece};
-    use crate::report::Status;
 
     fn vocabulary(pieces: &[(&str, Kind)]) -> Vocabulary {
         Vocabulary::new(
@@ -119,22 +85,5 @@ mod tests {
             ("<s>", Kind::Control),
         ]));
         assert!(counted.is_empty(), "byte and control pieces are not text");
-    }
-
-    #[test]
-    fn the_budget_is_reported_never_graded() {
-        let finding = vocabulary_budget(&vocabulary(&[
-            ("hello", Kind::Normal),
-            ("漢字", Kind::Normal),
-        ]));
-        assert_eq!(finding.status, Status::Passed);
-        assert_eq!(finding.evidence.len(), 2);
-    }
-
-    #[test]
-    fn an_empty_vocabulary_skips_with_its_grade() {
-        let finding = vocabulary_budget(&vocabulary(&[]));
-        assert_eq!(finding.status, Status::Skipped);
-        assert_eq!(finding.severity, Severity::Medium);
     }
 }

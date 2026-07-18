@@ -10,7 +10,7 @@
 //! because a check that could not run must never read as one that passed.
 
 use crate::model::artifact::{Artifact, Normalizer, Trainer, Vocabulary};
-use crate::model::{budget, config, pieces};
+use crate::model::{config, pieces};
 use crate::report::{Finding, Remedy, Report, Severity};
 
 /// The tunables a caller may reasonably disagree with.
@@ -58,7 +58,6 @@ fn vocabulary_findings(vocabulary: &Vocabulary, options: &Options) -> Vec<Findin
         pieces::digit_pieces(vocabulary, options.max_digit_piece_length).about(12),
         pieces::cross_script_pieces(vocabulary, options.digits_are_a_script).about(11),
         pieces::nfc_vocabulary(vocabulary).about(4),
-        budget::vocabulary_budget(vocabulary).about(13),
     ]
 }
 
