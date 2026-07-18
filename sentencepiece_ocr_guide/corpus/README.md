@@ -53,11 +53,49 @@ It is idempotent, which is what makes `line == canonicalize(line)` a valid asser
 corpus-write time. That assertion is the point: it moves the guarantee from a documented step
 that every pipeline is *supposed* to call into an invariant that fails loudly.
 
+## Rewriting a corpus
+
+`spm-ocr canonicalize` applies the above to files and then re-scans its own output, so the
+invariant is observed rather than assumed:
+
+```
+spm-ocr canonicalize corpus/*.txt --out canonical/
+spm-ocr canonicalize corpus/*.txt --in-place --decide soft_hyphen_line_final
+```
+
+```
+vendor_b.txt: 50,000 read, 7,188 changed, 3 dropped (invalid UTF-8)
+
+PASS  axis[nfc_composition]: no variation across 49,997 lines
+PASS  invalid_utf8: every one of 49,997 lines decoded as valid UTF-8
+PASS  axis[fullwidth_forms]: 7,176 of 49,997 lines (expected — preserve, do not fold)
+```
+
+Those last two lines are the whole point: the collapsible variation is gone, and the 7,176 lines
+of fullwidth text are still there. A canonicalizer that quietly flattened them would look just
+as clean.
+
+Three behaviours worth knowing:
+
+- **It never overwrites the input** unless `--in-place` is passed. A corpus is expensive to
+  reassemble, and a run configured with the wrong `--decide` axes does not look wrong afterwards.
+- **Undecodable bytes stop the run.** They cannot be repaired by normalizing, so writing them
+  back would either crash the encoder or launder corrupt data into a file that now *looks*
+  canonical. `--drop-invalid` skips those lines and reports the count, because that is data loss
+  and should be chosen. Output is written through a temporary file, so a refusal leaves nothing
+  partial behind.
+- **It is idempotent**, so running it twice is a no-op and re-running over a mixed corpus is safe.
+
 ## Verifying the stage worked
 
 Re-scan after canonicalizing. Every `COLLAPSE` axis should read zero and every `PRESERVE` axis
-should be unchanged; that difference is the proof. `tests/corpus/test_scan.py` asserts exactly
-this round trip.
+should be unchanged; that difference is the proof. `tests/corpus/test_scan.py` and
+`tests/corpus/test_rewrite.py` assert exactly this round trip.
+
+A one-shot rewrite fixes the corpus you have. It does not make the representation invariant
+going forward — that needs `canonicalizer()` wired into whatever adds data, with
+`is_canonical` asserted at write time. The command is for existing data; the library function
+is for the chokepoint.
 
 ## What this does not cover
 

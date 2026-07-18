@@ -10,7 +10,7 @@ failure needs a data fix rather than a retrain.
 """
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -20,6 +20,8 @@ from sentencepiece_ocr_guide.adapters.spm import SentencePieceTokenizer
 from sentencepiece_ocr_guide.checks.result import Report, Severity
 from sentencepiece_ocr_guide.checks.runner import run_checks
 from sentencepiece_ocr_guide.checks.suite import standard_suite
+from sentencepiece_ocr_guide.corpus.canonicalize import canonicalizer
+from sentencepiece_ocr_guide.corpus.rewrite import RewriteRun, UndecodableLineError, rewrite_lines
 from sentencepiece_ocr_guide.corpus.scan import scan_corpus
 from sentencepiece_ocr_guide.report import as_json, as_text, exit_code
 from sentencepiece_ocr_guide.samples import DEFAULT_SAMPLES
@@ -111,15 +113,95 @@ class BothChecklists(ModelChecklist):
         raise SystemExit(exit_code(combined, self.fail_on))
 
 
+class CanonicalizeCorpus(_Output):
+    """Rewrite corpus files into canonical form, then verify the result.
+
+    Never writes over the input unless asked: corpora are expensive to reassemble, and a
+    canonicalizer configured with the wrong `--decide` axes is not obviously wrong afterwards.
+    """
+
+    files: CliPositionalArg[list[Path]] = Field(description="Corpus text files to canonicalize")
+    out: Path | None = Field(
+        default=None, description="Directory to write canonicalized copies into"
+    )
+    in_place: CliImplicitFlag[bool] = Field(
+        default=False, description="Overwrite the input files instead of writing to --out."
+    )
+    decide: list[str] = Field(
+        default_factory=list,
+        description="DECIDE axes to apply, e.g. soft_hyphen_line_final. Measure first.",
+    )
+    drop_invalid: CliImplicitFlag[bool] = Field(
+        default=False,
+        description="Skip lines containing invalid UTF-8 instead of refusing. Loses data.",
+    )
+
+    def cli_cmd(self) -> None:
+        destination = self._destination()
+        canonicalize = canonicalizer(decide=tuple(self.decide))
+        run = RewriteRun()
+
+        written = [
+            _canonicalize_file(path, destination(path), canonicalize, run, self.drop_invalid)
+            for path in self.files
+        ]
+
+        for source, tally in run.per_source.items():
+            print(f"{source}: {tally.summary()}")
+
+        # Re-scan the output: the invariant is only established if it is observed.
+        report = _scan(written)
+        print()
+        self.emit(report)
+        raise SystemExit(exit_code(report, self.fail_on))
+
+    def _destination(self) -> Callable[[Path], Path]:
+        if self.in_place == (self.out is not None):
+            raise SystemExit("error: pass exactly one of --out DIR or --in-place")
+        if self.in_place:
+            return lambda path: path
+
+        out = self.out
+        assert out is not None  # guarded above
+        out.mkdir(parents=True, exist_ok=True)
+        return lambda path: out / path.name
+
+
 class SpmOcr(BaseSettings, cli_prog_name="spm-ocr", cli_kebab_case=True, populate_by_name=True):
     """Validate an OCR SentencePiece tokenizer and the corpus behind it."""
 
     corpus: CliSubCommand[CorpusChecklist]
     model: CliSubCommand[ModelChecklist]
     all: CliSubCommand[BothChecklists]
+    canonicalize: CliSubCommand[CanonicalizeCorpus]
 
     def cli_cmd(self) -> None:
         CliApp.run_subcommand(self)
+
+
+def _canonicalize_file(
+    source: Path,
+    target: Path,
+    canonicalize: Callable[[str], str],
+    run: RewriteRun,
+    drop_invalid: bool,
+) -> Path:
+    """Write through a temporary file so a rejected line leaves no partial output behind."""
+    tally = run.tally_for(source.name)
+    temporary = target.with_name(target.name + ".canonicalizing")
+
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for line in rewrite_lines(
+                _stream_lines(source), canonicalize, tally, source.name, drop_invalid
+            ):
+                handle.write(line + "\n")
+    except (UndecodableLineError, OSError) as error:
+        temporary.unlink(missing_ok=True)
+        raise SystemExit(f"error: {error}") from error
+
+    temporary.replace(target)
+    return target
 
 
 def _scan(files: list[Path]) -> Report:

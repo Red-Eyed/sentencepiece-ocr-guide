@@ -82,10 +82,11 @@ and the order matters — most model defects originate in the corpus, so scannin
 a training run:
 
 ```
-uv run spm-ocr corpus corpus/*.txt                        # 1. before training
-uv run spm-ocr model  ocr_tokenizer.model                 # 2. after training
-uv run spm-ocr all    ocr_tokenizer.model --corpus corpus/*.txt
-uv run spm-ocr model  ocr_tokenizer.model --json          # for CI
+uv run spm-ocr corpus       corpus/*.txt                  # 1. measure
+uv run spm-ocr canonicalize corpus/*.txt --out canonical/ # 2. fix, then verify
+uv run spm-ocr model        ocr_tokenizer.model           # 3. after training
+uv run spm-ocr all          ocr_tokenizer.model --corpus canonical/*.txt
+uv run spm-ocr model        ocr_tokenizer.model --json    # for CI
 ```
 
 Findings are ranked worst-first and carry both a severity and a remedy:

@@ -27,12 +27,9 @@ from sentencepiece_ocr_guide.checks.result import (
     Status,
 )
 from sentencepiece_ocr_guide.corpus.axes import DEFAULT_AXES, Action, Axis
+from sentencepiece_ocr_guide.corpus.undecodable import has_undecodable_bytes
 
 INVALID_UTF8 = "invalid_utf8"
-
-# `errors="surrogateescape"` maps each undecodable byte to one of these, so their presence in a
-# decoded line is exactly the evidence that the source was not valid UTF-8.
-_SURROGATES = frozenset(map(chr, range(0xDC80, 0xDD00)))
 
 _SEVERITY_FOR_ACTION: dict[Action, Severity] = {
     Action.COLLAPSE: Severity.BLOCKER,
@@ -94,7 +91,7 @@ def _count(sources: Mapping[str, Iterable[str]], axes: tuple[Axis, ...]) -> _Tal
             if line.isascii():
                 continue
 
-            if not _SURROGATES.isdisjoint(line):
+            if has_undecodable_bytes(line):
                 tally.undecodable[source] += 1
 
             for axis in axes:
