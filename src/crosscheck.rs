@@ -125,6 +125,7 @@ mod tests {
             long_lines: 0,
             per_script: scripts.iter().copied().collect::<BTreeMap<_, _>>(),
             per_axis: BTreeMap::new(),
+            forms: crate::corpus::scan::Forms::default(),
         }
     }
 

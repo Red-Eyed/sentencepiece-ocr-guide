@@ -306,6 +306,10 @@ fn scan_corpus_with(paths: &[PathBuf], config: &scan::Config) -> (Report, scan::
     report
         .findings
         .push(balance::script_balance(&combined).about(13));
+    // Per source rather than combined: which extractor disagrees is the actionable part.
+    report
+        .findings
+        .push(balance::normalization_forms(&totals).about(4));
 
     (report, combined)
 }

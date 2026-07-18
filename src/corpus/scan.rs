@@ -31,6 +31,8 @@ use std::collections::BTreeMap;
 
 use rayon::prelude::*;
 
+use unicode_normalization::{is_nfc, is_nfd};
+
 use crate::corpus::axis::{Action, Axis};
 use crate::corpus::source::Source;
 use crate::report::{Finding, MAX_EVIDENCE, Remedy, Report, Severity};
@@ -74,6 +76,72 @@ impl<'a> Config<'a> {
     }
 }
 
+/// Which normalization form a line is written in.
+///
+/// The four-way split matters because the interesting cases are not "NFC" and "NFD". Most lines
+/// say nothing at all — pure ASCII, or Han, carries no composable character and is simultaneously
+/// NFC and NFD — so counting those as NFC would report a corpus as 95% composed when the number
+/// is meaningless. And a line that is *neither* form is the strongest signal available: one
+/// extractor produced both spellings inside a single line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    /// No composable characters, so the line reveals nothing about its source.
+    Undecidable,
+    /// NFC, and not NFD.
+    Composed,
+    /// NFD, and not NFC.
+    Decomposed,
+    /// Neither: both spellings appear in one line.
+    Mixed,
+}
+
+impl Form {
+    pub fn of(line: &str) -> Form {
+        // ASCII cannot compose or decompose, so it is both forms at once and needs no lookup.
+        if line.is_ascii() {
+            return Form::Undecidable;
+        }
+        match (is_nfc(line), is_nfd(line)) {
+            (true, true) => Form::Undecidable,
+            (true, false) => Form::Composed,
+            (false, true) => Form::Decomposed,
+            (false, false) => Form::Mixed,
+        }
+    }
+}
+
+/// Line counts per normalization form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Forms {
+    pub undecidable: u64,
+    pub composed: u64,
+    pub decomposed: u64,
+    pub mixed: u64,
+}
+
+impl Forms {
+    pub fn add(&mut self, form: Form) {
+        match form {
+            Form::Undecidable => self.undecidable += 1,
+            Form::Composed => self.composed += 1,
+            Form::Decomposed => self.decomposed += 1,
+            Form::Mixed => self.mixed += 1,
+        }
+    }
+
+    pub fn absorb(&mut self, other: &Forms) {
+        self.undecidable += other.undecidable;
+        self.composed += other.composed;
+        self.decomposed += other.decomposed;
+        self.mixed += other.mixed;
+    }
+
+    /// Lines that carry the distinction, which is the only honest denominator for a share.
+    pub fn decidable(&self) -> u64 {
+        self.composed + self.decomposed + self.mixed
+    }
+}
+
 /// What one unit of work observed. Merged commutatively, so completion order cannot affect the
 /// report — a parallel run and a serial one produce identical output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -87,6 +155,8 @@ pub struct Counts {
     pub per_script: BTreeMap<&'static str, u64>,
     /// Affected-line count per axis name. Ordered so merging and rendering are deterministic.
     pub per_axis: BTreeMap<&'static str, u64>,
+    /// Which normalization form each line is written in.
+    pub forms: Forms,
 }
 
 impl Counts {
@@ -94,6 +164,7 @@ impl Counts {
         self.lines += other.lines;
         self.invalid_utf8 += other.invalid_utf8;
         self.long_lines += other.long_lines;
+        self.forms.absorb(&other.forms);
         for (axis, count) in other.per_axis {
             *self.per_axis.entry(axis).or_default() += count;
         }
@@ -118,6 +189,7 @@ pub fn count_line(line: &str, config: &Config, counts: &mut Counts) {
     }
 
     count_scripts(line, counts);
+    counts.forms.add(Form::of(line));
 
     // No axis fires on ASCII, so the whole axis loop is skipped for what is typically most of a
     // corpus. `Axis::apply` re-checks this; doing it here as well skips the dispatch entirely.
