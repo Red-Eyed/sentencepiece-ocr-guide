@@ -9,6 +9,7 @@ license = "MIT"
 dependencies = [
     "pydantic-settings>=2.14.2",
     "sentencepiece>=0.2.2",
+    "tqdm>=4.67",
 ]
 
 [project.scripts]

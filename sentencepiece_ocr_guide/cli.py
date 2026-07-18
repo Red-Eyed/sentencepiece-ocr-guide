@@ -10,7 +10,7 @@ failure needs a data fix rather than a retrain.
 """
 
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -30,6 +30,7 @@ from sentencepiece_ocr_guide.corpus.discover import (
 )
 from sentencepiece_ocr_guide.corpus.rewrite import RewriteRun, UndecodableLineError, rewrite_lines
 from sentencepiece_ocr_guide.corpus.scan import scan_corpus
+from sentencepiece_ocr_guide.progress import byte_progress
 from sentencepiece_ocr_guide.report import as_json, as_text, exit_code
 from sentencepiece_ocr_guide.samples import DEFAULT_SAMPLES
 
@@ -157,10 +158,15 @@ class CanonicalizeCorpus(_Output):
         run = RewriteRun()
 
         discovery = _discover(self.files, self.jobs)
-        written = [
-            _canonicalize_file(found, destination(found), canonicalize, run, self.drop_invalid)
-            for found in discovery.files
-        ]
+        written: list[Path] = []
+
+        with byte_progress(_total_bytes(discovery.files), "canonicalizing") as track:
+            for found in discovery.files:
+                lines = track(_stream_lines(found.path))
+                target = destination(found)
+                written.append(
+                    _canonicalize_file(found, lines, target, canonicalize, run, self.drop_invalid)
+                )
 
         for source, tally in run.per_source.items():
             print(f"{source}: {tally.summary()}")
@@ -203,20 +209,23 @@ class SpmOcr(BaseSettings, cli_prog_name="spm-ocr", cli_kebab_case=True, populat
 
 def _canonicalize_file(
     source: TextFile,
+    lines: Iterator[str],
     target: Path,
     canonicalize: Callable[[str], str],
     run: RewriteRun,
     drop_invalid: bool,
 ) -> Path:
-    """Write through a temporary file so a rejected line leaves no partial output behind."""
+    """Write through a temporary file so a rejected line leaves no partial output behind.
+
+    The input arrives as a stream rather than being opened here, so the caller decides what it
+    is reading from — a plain file, or the same file behind a progress bar.
+    """
     tally = run.tally_for(source.label)
     temporary = target.with_name(target.name + ".canonicalizing")
 
     try:
         with temporary.open("w", encoding="utf-8") as handle:
-            for line in rewrite_lines(
-                _stream_lines(source.path), canonicalize, tally, source.label, drop_invalid
-            ):
+            for line in rewrite_lines(lines, canonicalize, tally, source.label, drop_invalid):
                 handle.write(line + "\n")
     except (UndecodableLineError, OSError) as error:
         temporary.unlink(missing_ok=True)
@@ -237,10 +246,20 @@ def _discover(paths: list[Path], jobs: int) -> Discovery:
 
 def _scan(paths: list[Path], jobs: int) -> Report:
     discovery = _discover(paths, jobs)
-    return scan_corpus(
-        {found.label: _stream_lines(found.path) for found in discovery.files},
-        workers=jobs,
-    )
+    with byte_progress(_total_bytes(discovery.files), "scanning") as track:
+        return scan_corpus(
+            {found.label: track(_stream_lines(found.path)) for found in discovery.files},
+            workers=jobs,
+        )
+
+
+def _total_bytes(files: Iterable[TextFile]) -> int:
+    """The size of everything about to be read, for a bar that can show a percentage.
+
+    Above one worker this runs slightly ahead of what has been *counted* — the reader stays a
+    bounded number of chunks in front of the pool — so the bar fills just before the report does.
+    """
+    return sum(found.path.stat().st_size for found in files)
 
 
 def _stream_lines(path: Path) -> Iterator[str]:
