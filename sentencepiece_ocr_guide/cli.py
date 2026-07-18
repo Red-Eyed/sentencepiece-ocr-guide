@@ -230,6 +230,12 @@ def _canonicalize_file(
     except (UndecodableLineError, OSError) as error:
         temporary.unlink(missing_ok=True)
         raise SystemExit(f"error: {error}") from error
+    except BaseException:
+        # `KeyboardInterrupt` above all. Only `.replace` below publishes a result, so anything
+        # that leaves early must take the partial file with it rather than strand a
+        # `.canonicalizing` shard next to the corpus for the operator to find and clean up.
+        temporary.unlink(missing_ok=True)
+        raise
 
     temporary.replace(target)
     return target
@@ -286,7 +292,14 @@ def _read_lines(path: Path | None) -> tuple[str, ...]:
 
 
 def main() -> None:
-    CliApp.run(SpmOcr)
+    try:
+        CliApp.run(SpmOcr)
+    except KeyboardInterrupt:
+        # A scan runs for minutes, so Ctrl-C is a normal way to end one — report it as an outcome
+        # rather than dumping a thread-pool traceback the operator has to read past. 130 is the
+        # shell's convention for "terminated by SIGINT".
+        print("interrupted", file=sys.stderr)
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":

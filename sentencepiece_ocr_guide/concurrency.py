@@ -29,6 +29,7 @@ import os
 import subprocess
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from itertools import islice
 from typing import TypeVar
 
@@ -37,6 +38,26 @@ Result = TypeVar("Result")
 
 RESERVED_CORES = 1
 IN_FLIGHT_PER_WORKER = 2
+
+
+@contextmanager
+def cancelling_pool(workers: int) -> Iterator[ThreadPoolExecutor]:
+    """A pool that drops queued work on the way out instead of waiting for it.
+
+    `ThreadPoolExecutor.__exit__` hardcodes `shutdown(wait=True)`, and that is what makes Ctrl-C
+    feel dead: the `KeyboardInterrupt` unwinds *into* the join and blocks there until every item
+    already submitted has finished. With `pool.map` that is the entire remaining corpus.
+
+    Cancelling the queue instead bounds an interrupt at the work already running — at most one
+    chunk per worker — and the exception continues to propagate normally. On the ordinary path
+    every future has been consumed by the time this runs, so there is nothing left to cancel and
+    nothing to wait for.
+    """
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        yield pool
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def default_workers() -> int:
@@ -93,7 +114,7 @@ def run_parallel(
     if workers <= 1 or len(materialized) <= 1:
         return [work(item) for item in materialized]
 
-    with ThreadPoolExecutor(max_workers=min(workers, len(materialized))) as pool:
+    with cancelling_pool(min(workers, len(materialized))) as pool:
         return list(pool.map(work, materialized))
 
 
@@ -126,7 +147,7 @@ def stream_parallel_unordered(
     limit = in_flight or workers * IN_FLIGHT_PER_WORKER
     pending: set[Future[Result]] = set()
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with cancelling_pool(workers) as pool:
         for item in items:
             pending.add(pool.submit(work, item))
             if len(pending) >= limit:
