@@ -10,6 +10,7 @@ failure needs a data fix rather than a retrain.
 """
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -122,14 +123,30 @@ class SpmOcr(BaseSettings, cli_prog_name="spm-ocr", cli_kebab_case=True, populat
 
 
 def _scan(files: list[Path]) -> Report:
-    return scan_corpus({str(path): _read_lines(path) for path in files})
+    return scan_corpus({path.name: _stream_lines(path) for path in files})
+
+
+def _stream_lines(path: Path) -> Iterator[str]:
+    """Yield a corpus file line by line, never holding more than one line in memory.
+
+    Decoding uses `surrogateescape` rather than the default strict mode. A corpus assembled from
+    legacy extractors frequently contains bytes that are not valid UTF-8, and a tool whose
+    purpose is finding encoding defects must report that rather than dying on it. The escaped
+    bytes survive as lone surrogates, which is exactly what the scanner detects.
+    """
+    with path.open("r", encoding="utf-8", errors="surrogateescape") as handle:
+        for line in handle:
+            stripped = line.rstrip("\n")
+            if stripped.strip():
+                yield stripped
 
 
 def _read_lines(path: Path | None) -> tuple[str, ...]:
+    """Read a small file whole — sample and symbol lists, which are iterated more than once."""
     if path is None:
         return ()
-    lines = path.read_text(encoding="utf-8").split("\n")
-    return tuple(line for line in lines if line.strip())
+    with path.open("r", encoding="utf-8", errors="surrogateescape") as handle:
+        return tuple(line.rstrip("\n") for line in handle if line.strip())
 
 
 def main() -> None:

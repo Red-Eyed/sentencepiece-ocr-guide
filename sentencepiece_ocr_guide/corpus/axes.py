@@ -7,6 +7,15 @@ canonicalizer reuses the same transforms for the subset it is allowed to apply.
 The verdict is what keeps the two uses honest. `PRESERVE` axes carry a transform purely so they
 can be *detected* — `canonicalize` filters on `Action` and can never fold one by accident. See
 docs/09-failure-modes.md for the reasoning behind each verdict.
+
+**Every axis here fires only on non-ASCII input.** That invariant is what makes scanning a real
+corpus affordable: a pure-ASCII line cannot be affected by any axis, so the scanner skips all of
+them with one C-level test. `tests/corpus/test_axes.py` asserts it for every axis, because a new
+axis that broke it would silently stop being detected on ASCII lines.
+
+Axes also carry the exact set of characters that can trigger them, bound to the transform at
+construction so the two cannot drift. When a line contains none of them, the transform is
+skipped entirely.
 """
 
 import unicodedata
@@ -34,37 +43,53 @@ class Action(StrEnum):
 
 @dataclass(frozen=True)
 class Axis:
-    """One way two encodings of the same text can differ."""
+    """One way two encodings of the same text can differ.
+
+    `triggers` is the exact set of characters that can make `transform` change a line, or `None`
+    when that set is impractical to enumerate. It is only ever an optimisation: `affects` still
+    confirms with the transform itself, so an over-broad trigger set costs speed, never accuracy.
+    """
 
     name: str
     action: Action
     rationale: str
     transform: Callable[[str], str]
+    triggers: frozenset[str] | None = None
 
     def affects(self, line: str) -> bool:
+        if line.isascii():
+            return False
+        if self.triggers is not None and self.triggers.isdisjoint(line):
+            return False
         return self.transform(line) != line
 
 
-def _strip(*codepoints: int) -> Callable[[str], str]:
+def _chars(*codepoints: int) -> frozenset[str]:
+    return frozenset(chr(codepoint) for codepoint in codepoints)
+
+
+def _strip_axis(name: str, action: Action, rationale: str, *codepoints: int) -> Axis:
+    """Delete `codepoints`. Triggers are exactly those codepoints."""
     table: dict[int, str | None] = {codepoint: None for codepoint in codepoints}
 
     def transform(text: str) -> str:
         return text.translate(table)
 
-    return transform
+    return Axis(name, action, rationale, transform, _chars(*codepoints))
 
 
-def _replace(mapping: Mapping[int, str]) -> Callable[[str], str]:
+def _replace_axis(name: str, action: Action, rationale: str, mapping: Mapping[int, str]) -> Axis:
+    """Rewrite `mapping`'s codepoints. Triggers are exactly its keys."""
     table: dict[int, str | None] = dict(mapping)
 
     def transform(text: str) -> str:
         return text.translate(table)
 
-    return transform
+    return Axis(name, action, rationale, transform, _chars(*mapping))
 
 
-def _fold_ranges(*ranges: range) -> Callable[[str], str]:
-    """NFKC-fold only the characters inside `ranges`, leaving everything else untouched."""
+def _fold_axis(name: str, action: Action, rationale: str, *ranges: range) -> Axis:
+    """NFKC-fold only the characters inside `ranges`. Triggers are exactly those ranges."""
     members = frozenset(codepoint for span in ranges for codepoint in span)
 
     def transform(text: str) -> str:
@@ -72,7 +97,7 @@ def _fold_ranges(*ranges: range) -> Callable[[str], str]:
             unicodedata.normalize("NFKC", char) if ord(char) in members else char for char in text
         )
 
-    return transform
+    return Axis(name, action, rationale, transform, frozenset(map(chr, members)))
 
 
 def _compose(text: str) -> str:
@@ -80,7 +105,8 @@ def _compose(text: str) -> str:
 
 
 def _ascii_digit(char: str) -> str:
-    if char.isascii() or unicodedata.category(char) != "Nd":
+    # `str.isdecimal` is the C-level equivalent of `unicodedata.category(char) == "Nd"`.
+    if char.isascii() or not char.isdecimal():
         return char
     return str(unicodedata.decimal(char))
 
@@ -122,77 +148,98 @@ _TYPOGRAPHIC_PUNCTUATION = {
 # must be stripped before that fold runs, and NFC must run last because folding can emit
 # decomposed sequences.
 DEFAULT_AXES: tuple[Axis, ...] = (
-    Axis(
-        name="zero_width_non_content",
-        action=Action.COLLAPSE,
-        rationale="BOM and zero-width space are not page content",
-        transform=_strip(0xFEFF, 0x200B),
+    _strip_axis(
+        "zero_width_non_content",
+        Action.COLLAPSE,
+        "BOM and zero-width space are not page content",
+        0xFEFF,
+        0x200B,
     ),
-    Axis(
-        name="arabic_presentation_forms",
-        action=Action.COLLAPSE,
-        rationale="legacy pre-shaped glyphs; shaping is derivable from context",
-        transform=_fold_ranges(range(0xFB50, 0xFE00), range(0xFE70, 0xFF00)),
+    _fold_axis(
+        "arabic_presentation_forms",
+        Action.COLLAPSE,
+        "legacy pre-shaped glyphs; shaping is derivable from context",
+        range(0xFB50, 0xFE00),
+        range(0xFE70, 0xFF00),
     ),
-    Axis(
-        name="nbsp",
-        action=Action.COLLAPSE,
-        rationale="differs only in line-breaking, which a line image cannot show",
-        transform=_replace({0x00A0: " "}),
+    _fold_axis(
+        "hebrew_presentation_forms",
+        Action.COLLAPSE,
+        "legacy precomposed letter+point glyphs; identical to the logical sequence",
+        range(0xFB1D, 0xFB50),
+    ),
+    _replace_axis(
+        "nbsp",
+        Action.COLLAPSE,
+        "differs only in line-breaking, which a line image cannot show",
+        {0x00A0: " "},
     ),
     Axis(
         name="nfc_composition",
         action=Action.COLLAPSE,
         rationale="canonically equivalent — not a difference in the text",
         transform=_compose,
+        # Composability is a property of sequences, not of an enumerable character set.
+        # `normalize` is C-level and measured at ~1% of scan time, so no fast path is needed.
+        triggers=None,
     ),
     Axis(
         name="soft_hyphen_line_final",
         action=Action.DECIDE,
         rationale="rendered as a real hyphen where the line breaks",
         transform=_soft_hyphen_line_final,
+        triggers=frozenset(SOFT_HYPHEN),
     ),
     Axis(
         name="soft_hyphen_mid_line",
         action=Action.DECIDE,
         rationale="never drawn away from a line break",
         transform=_soft_hyphen_mid_line,
+        triggers=frozenset(SOFT_HYPHEN),
     ),
-    Axis(
-        name="fullwidth_forms",
-        action=Action.PRESERVE,
-        rationale="different characters with visibly wider glyphs",
-        transform=_fold_ranges(range(0xFF01, 0xFF61), range(0xFFE0, 0xFFE7)),
+    _fold_axis(
+        "fullwidth_forms",
+        Action.PRESERVE,
+        "different characters with visibly wider glyphs",
+        range(0xFF01, 0xFF61),
+        range(0xFFE0, 0xFFE7),
     ),
-    Axis(
-        name="ligatures",
-        action=Action.PRESERVE,
-        rationale="typography the model can see in the image",
-        transform=_fold_ranges(range(0xFB00, 0xFB50)),
+    _fold_axis(
+        "ligatures",
+        Action.PRESERVE,
+        "typography the model can see in the image",
+        # Latin (FB00–FB06) and Armenian (FB13–FB17) ligatures only. The Hebrew presentation
+        # forms that share this block are a legacy encoding artifact, not typography, and are
+        # collapsed by their own axis above.
+        range(0xFB00, 0xFB1D),
     ),
     Axis(
         name="non_ascii_digits",
         action=Action.PRESERVE,
         rationale="Arabic-Indic and other digits are visibly distinct from ASCII",
         transform=_fold_non_ascii_digits,
+        # ~700 scattered codepoints across Unicode; enumerating them at import costs more than
+        # the per-character `str.isdecimal` test it would save.
+        triggers=None,
     ),
-    Axis(
-        name="typographic_punctuation",
-        action=Action.PRESERVE,
-        rationale="curly quotes and dash widths are distinct glyphs",
-        transform=_replace(_TYPOGRAPHIC_PUNCTUATION),
+    _replace_axis(
+        "typographic_punctuation",
+        Action.PRESERVE,
+        "curly quotes and dash widths are distinct glyphs",
+        _TYPOGRAPHIC_PUNCTUATION,
     ),
-    Axis(
-        name="ideographic_space",
-        action=Action.PRESERVE,
-        rationale="U+3000 is a visibly wider space",
-        transform=_replace({0x3000: " "}),
+    _replace_axis(
+        "ideographic_space",
+        Action.PRESERVE,
+        "U+3000 is a visibly wider space",
+        {0x3000: " "},
     ),
-    Axis(
-        name="zero_width_joiners",
-        action=Action.PRESERVE,
-        rationale="ZWJ and ZWNJ change the shape of neighbouring letters",
-        transform=_strip(ord(ZERO_WIDTH_NON_JOINER), ord(ZERO_WIDTH_JOINER)),
+    _strip_axis(
+        "zero_width_joiners",
+        Action.PRESERVE,
+        "ZWJ and ZWNJ change the shape of neighbouring letters",
+        ord(ZERO_WIDTH_NON_JOINER),
+        ord(ZERO_WIDTH_JOINER),
     ),
 )
 
