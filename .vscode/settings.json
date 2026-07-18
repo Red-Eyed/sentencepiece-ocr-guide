@@ -1,4 +1,4 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.terminal.activateEnvironment": true
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true
 }

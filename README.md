@@ -99,11 +99,10 @@ Directories are walked recursively. Binary files are skipped by content, not ext
 trained `.model` sitting beside your corpus is the usual reason that matters — and what was
 skipped is always reported.
 
-The corpus scan is **threaded by default**, dispatching chunks of lines so a single large file
-parallelizes as well as many shards. The project targets free-threaded CPython (`.python-version`
-pins `3.14t`), where threads run Python genuinely in parallel; on a GIL build everything still
-works and simply stops being faster. `--jobs` overrides the default, and the report is identical
-at any setting.
+The corpus scan is **parallel by default**, across sources and within each one: a file above a
+megabyte is split into line-aligned chunks, so a single large file parallelizes as well as many
+shards. Files are memory-mapped rather than read, which is what lets a corpus larger than RAM be
+scanned at all. `--jobs` overrides the default, and the report is byte-identical at any setting.
 
 Findings are ranked worst-first and carry both a severity and a remedy:
 
@@ -132,26 +131,55 @@ Three things that matter about that output:
 - **`SKIP` is never `PASS`,** and keeps its severity. A skipped blocker is exactly what must not
   read as clean.
 
-Exit is non-zero at `--fail-on` severity (default `high`). Defaults use a small built-in
-stratified sample set; pass `--samples` from your own ground truth for a real verdict, and
-`--symbols` with your `user_defined_symbols`.
+Exit is non-zero at `--fail-on` severity (default `high`).
 
-Architecture: [`checks/`](sentencepiece_ocr_guide/checks/README.md) (the artifact suite) and
-[`corpus/`](sentencepiece_ocr_guide/corpus/README.md) (axis scanning and canonicalization).
+## What the model checks read
+
+The model checklist reads the `.model` protobuf and nothing else — its piece inventory and the
+trainer and normalizer settings recorded inside it. No samples, no tokenizer runtime, no corpus.
+
+That is a narrower input than a checklist like this usually assumes, and for most of it a
+stronger one. Encoding samples to see whether `<unk>` appears tells you it did not appear *in
+those samples*; reading `byte_fallback` together with a complete set of 256 byte pieces tells you
+it cannot appear **for any input**. For the one check the guide calls out as having no acceptable
+failure threshold, that is the difference between evidence and proof. The same applies to
+`add_dummy_prefix`, which the sampling version infers by experiment and the artifact simply
+states.
+
+It also reaches settings a tokenizer runtime does not expose at all, so the checklist can ask
+whether the model was *actually* trained as BPE, with `split_digits`, at the recommended piece
+length — the contents of [configuration](docs/03-configuration.md), verified against the artifact.
+
+Two checks need what this cannot give them. `fertility` and the exact byte-fallback rate measure
+the tokenizer against real text, so both require encoding it. They report as `SKIP` with the
+reason attached and keep their severity.
+
+Where a recommendation depends on something the tool cannot see, the setting is reported rather
+than graded. `normalization_rule` is the case that matters: `identity` is correct only if your
+ground truth is un-normalized, so the report states what the model does and leaves the verdict
+to you.
 
 ## Repo layout
 
-The repo is a Python project (`uv` + `just`); the checks live alongside the guide they encode.
+A Rust project (`cargo` + `just`), with no runtime dependencies beyond the binary itself.
 
 ```
 just          # list recipes, grouped into [workflow] and [dev]
-just check    # fmt-check + lint + types + test
-just runtime  # which interpreter, GIL on or off, default --jobs
-just hooks    # install prek git hooks
+just check    # fmt-check + lint + test
+just build    # the release binary
+just runtime  # toolchain, and the parallelism the scan defaults to
+just hooks    # install the pre-commit hook
 ```
 
-Every claim in the guide that can be demonstrated has a test that induces the failure and proves
-the corresponding check catches it — see [`tests/pitfalls/`](tests/pitfalls/).
+The checks live alongside the guide they encode: [`src/corpus/`](src/corpus/) scans and
+canonicalizes, [`src/model/`](src/model/) reads the artifact, and both produce the same
+[`Finding`](src/report.rs) vocabulary so a corpus result and a model result rank, read and exit
+identically.
+
+Two trained tokenizers are checked in at [`tests/fixtures/`](tests/fixtures/) — one configured
+the way this guide argues for, one with SentencePiece's stock defaults. The integration tests run
+the full checklist against both, so the claim that the defaults are wrong for OCR is executable
+rather than asserted.
 
 ---
 

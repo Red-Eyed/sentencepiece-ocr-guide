@@ -1,5 +1,10 @@
 set dotenv-load := false
 
+# The tool, built on demand. `cargo run` rebuilds only when something changed, so no recipe
+# needs a "build first" note — and cargo's own output goes to stderr, leaving stdout clean
+# for `--json`.
+spm := "cargo run --release --quiet --"
+
 # List available recipes, grouped
 default:
     @just --list --unsorted
@@ -25,10 +30,15 @@ workflow:
     @echo "A SKIP is never a PASS, and a PRESERVE axis with a non-zero count is not a"
     @echo "defect — it is confirmation that script is present in your data."
     @echo ""
+    @echo "The model checks read the .model file itself — its pieces and the trainer"
+    @echo "settings recorded in it — so they need no samples and no tokenizer runtime."
+    @echo "Two checks do need one: fertility and the exact byte-fallback rate measure"
+    @echo "the tokenizer against real text, and are reported as SKIP with the reason."
+    @echo ""
     @echo "Every recipe forwards extra flags:"
     @echo "  just scan corpus/ --jobs 2 --json"
     @echo "  just canon corpus/ out/ --decide soft_hyphen_line_final"
-    @echo "  just check-model ocr.model --samples gt.txt --symbols syms.txt"
+    @echo "  just check-model ocr.model --allow-digit-letter-pieces"
     @echo ""
     @echo "Full option list: just options"
 
@@ -36,110 +46,99 @@ workflow:
 [group('workflow')]
 [no-exit-message]
 scan +PATHS:
-    uv run spm-ocr corpus {{ PATHS }}
+    {{ spm }} corpus {{ PATHS }}
 
 # Step 2 — rewrite a corpus into canonical form, then re-scan to verify it
 [group('workflow')]
 [no-exit-message]
 canon SOURCE OUT *FLAGS:
-    uv run spm-ocr canonicalize {{ SOURCE }} --out {{ OUT }} {{ FLAGS }}
+    {{ spm }} canonicalize {{ SOURCE }} --out {{ OUT }} {{ FLAGS }}
 
 # Step 2, overwriting the originals instead of writing copies
 [group('workflow')]
 [no-exit-message]
 canon-in-place +PATHS:
-    uv run spm-ocr canonicalize {{ PATHS }} --in-place
+    {{ spm }} canonicalize {{ PATHS }} --in-place
 
 # Step 4 — run the artifact checks against a trained .model
 [group('workflow')]
 [no-exit-message]
 check-model MODEL *FLAGS:
-    uv run spm-ocr model {{ MODEL }} {{ FLAGS }}
+    {{ spm }} model {{ MODEL }} {{ FLAGS }}
 
 # Both checklists in one run, corpus findings first
 [group('workflow')]
 [no-exit-message]
 check-all MODEL CORPUS *FLAGS:
-    uv run spm-ocr all {{ MODEL }} --corpus {{ CORPUS }} {{ FLAGS }}
+    {{ spm }} all {{ MODEL }} --corpus {{ CORPUS }} {{ FLAGS }}
 
 # Show every command-line option for every subcommand
 [group('workflow')]
 options:
-    @uv run spm-ocr --help
+    @{{ spm }} --help
     @for cmd in corpus canonicalize model all; do \
-        echo ""; echo "=== spm-ocr $cmd ==="; uv run spm-ocr $cmd --help; \
+        echo ""; echo "=== spm-ocr $cmd ==="; {{ spm }} $cmd --help; \
     done
 
 # ---------------------------------------------------------------------------
 # Development
 # ---------------------------------------------------------------------------
 
-# Install all dependencies (including dev)
+# Fetch dependencies
 [group('dev')]
 sync:
-    uv sync --group dev
+    cargo fetch
 
-# Run fmt-check + lint + types + test (CI gate)
+# Build the release binary
 [group('dev')]
-check: fmt-check lint types test
+build:
+    cargo build --release
 
-# Format, lint-fix, then run all checks
+# fmt-check + lint + test (CI gate)
 [group('dev')]
-fix: fmt lint-fix
+check: fmt-check lint test
+
+# Format, then run all checks
+[group('dev')]
+fix: fmt
     just check
 
-# Run tests
+# Run tests, unit and integration
 [group('dev')]
 test *ARGS:
-    uv run pytest tests/ -q {{ ARGS }}
+    cargo test {{ ARGS }}
 
-# Type-check with pyrefly
-[group('dev')]
-types:
-    uv run pyrefly check sentencepiece_ocr_guide/ tests/
-
-# Lint source and tests
+# Clippy with warnings as errors, so the deny-list in Cargo.toml is enforced
 [group('dev')]
 lint:
-    uv run ruff check sentencepiece_ocr_guide/ tests/
+    cargo clippy --all-targets -- -D warnings
 
-# Lint and auto-fix what's safe
-[group('dev')]
-lint-fix:
-    uv run ruff check --fix sentencepiece_ocr_guide/ tests/
-
-# Format source and tests
+# Format
 [group('dev')]
 fmt:
-    uv run ruff format sentencepiece_ocr_guide/ tests/
+    cargo fmt
 
 # Check formatting without modifying files
 [group('dev')]
 fmt-check:
-    uv run ruff format --check sentencepiece_ocr_guide/ tests/
+    cargo fmt --check
 
-# Install git hooks
+# Install the pre-commit hook, which runs `just check`
 [group('dev')]
 hooks:
-    uvx prek install
+    @mkdir -p .git/hooks
+    @printf '#!/bin/sh\nexec just check\n' > .git/hooks/pre-commit
+    @chmod +x .git/hooks/pre-commit
+    @echo "installed .git/hooks/pre-commit -> just check"
 
-# Run all git hooks against every file
-[group('dev')]
-hooks-run:
-    uvx prek run --all-files
-
-# Report the interpreter, whether the GIL is off, and the default worker count
+# Report the toolchain and the parallelism the scan will default to
 [group('dev')]
 runtime:
-    @uv run python -c "import sys, os; \
-        gil = getattr(sys, '_is_gil_enabled', lambda: True)(); \
-        print(f'python {sys.version.split()[0]}   GIL enabled: {gil}   cores: {os.cpu_count()}')"
-    @uv run python -c "from sentencepiece_ocr_guide.concurrency import default_workers; \
-        print(f'default --jobs: {default_workers()}')"
+    @cargo --version
+    @rustc --version
+    @echo "cores: $(getconf _NPROCESSORS_ONLN) (rayon's default --jobs)"
 
-# Remove build artifacts and caches
+# Remove build artifacts
 [group('dev')]
 clean:
-    rm -rf dist/ .venv/ .ruff_cache/ .pytest_cache/
-    find . -type d -name "__pycache__" -exec rm -rf {} +
-    find . -type d -name "*.egg-info" -exec rm -rf {} +
+    cargo clean

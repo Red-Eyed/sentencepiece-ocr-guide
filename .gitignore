@@ -19,3 +19,7 @@ wheels/
 *.vocab
 corpora/
 /target
+
+# ...except the test fixtures. Training them needs a SentencePiece trainer, which this project
+# deliberately does not depend on, so they are checked in rather than regenerated.
+!tests/fixtures/*.model

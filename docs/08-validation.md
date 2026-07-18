@@ -11,9 +11,14 @@ inverted list and what each one costs the finished system.
 Most of this is automated as two checklists — run them rather than working through this by hand:
 
 ```
-uv run spm-ocr corpus my_corpus/*.txt          # before training
-uv run spm-ocr model  ocr_tokenizer.model --samples my_ground_truth.txt --symbols my_symbols.txt
+spm-ocr corpus my_corpus/            # before training
+spm-ocr model  ocr_tokenizer.model   # after
 ```
+
+The model checks read the `.model` file itself — its pieces, and the trainer and normalizer
+settings recorded inside it — so they need neither samples nor a tokenizer runtime. Two items
+below do: fertility and the exact byte-fallback rate measure the tokenizer against real text,
+and are reported as `SKIP` with the reason rather than silently omitted.
 
 Run the corpus one **first**. Several vocabulary checks below only ever fail because of a corpus
 defect, and discovering that after training costs you the training run. Findings are ranked by
