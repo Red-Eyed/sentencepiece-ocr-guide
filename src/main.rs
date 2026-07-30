@@ -1,7 +1,9 @@
 mod cli;
 mod config;
 mod corpus;
+mod normalize;
 mod progress;
+mod repair;
 
 use std::process::ExitCode;
 

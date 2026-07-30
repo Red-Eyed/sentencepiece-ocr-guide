@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::config::{self, EffectiveConfig};
 use crate::corpus::{self, DiscoveredCorpus};
 use crate::progress::ProgressReporter;
+use crate::repair::{self, RepairSummary};
 
 #[derive(Debug, Parser)]
 #[command(name = "spm-ocr", version, about)]
@@ -35,6 +36,12 @@ struct TrainSummary {
     preset: String,
     corpus_path: PathBuf,
     text_files: usize,
+    fixed_corpus: PathBuf,
+    issue_log: PathBuf,
+    lines_read: u64,
+    lines_written: u64,
+    lines_fixed: u64,
+    lines_skipped: u64,
     work_dir: PathBuf,
     model_prefix: String,
 }
@@ -51,15 +58,19 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
 
     let config = load_config(&args, &progress)?;
     let corpus = discover_corpus(&config, &progress)?;
-    let summary = TrainSummary::from_config_and_corpus(&config, &corpus);
+    let repair = repair_corpus(&config, &corpus, &progress)?;
+    let summary = TrainSummary::from_config_and_repair(&config, &corpus, &repair);
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
         println!(
-            "Ready: preset `{}`, {} text file(s), output `{}`",
+            "Prepared: preset `{}`, {} text file(s), {} line(s) written, {} fixed, {} skipped, output `{}`",
             summary.preset,
             summary.text_files,
+            summary.lines_written,
+            summary.lines_fixed,
+            summary.lines_skipped,
             summary.work_dir.display()
         );
     }
@@ -91,12 +102,31 @@ fn discover_corpus(
     Ok(corpus)
 }
 
+fn repair_corpus(
+    config: &EffectiveConfig,
+    corpus: &DiscoveredCorpus,
+    progress: &ProgressReporter,
+) -> Result<RepairSummary> {
+    repair::repair_corpus(config, corpus, progress)
+        .with_context(|| format!("could not repair {}", config.corpus.path.display()))
+}
+
 impl TrainSummary {
-    fn from_config_and_corpus(config: &EffectiveConfig, corpus: &DiscoveredCorpus) -> Self {
+    fn from_config_and_repair(
+        config: &EffectiveConfig,
+        corpus: &DiscoveredCorpus,
+        repair: &RepairSummary,
+    ) -> Self {
         Self {
             preset: config.preset.clone(),
             corpus_path: corpus.root.clone(),
             text_files: corpus.files.len(),
+            fixed_corpus: repair.fixed_corpus.clone(),
+            issue_log: repair.issue_log.clone(),
+            lines_read: repair.lines_read,
+            lines_written: repair.lines_written,
+            lines_fixed: repair.lines_fixed,
+            lines_skipped: repair.lines_skipped,
             work_dir: config.output.work_dir.clone(),
             model_prefix: config.output.model_prefix.clone(),
         }

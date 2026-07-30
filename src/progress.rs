@@ -33,6 +33,10 @@ pub struct StageProgress {
 }
 
 impl StageProgress {
+    pub fn set_message(&self, message: impl Into<String>) {
+        self.bar.set_message(message.into());
+    }
+
     pub fn finish(self, message: impl Into<String>) {
         self.bar.finish_with_message(message.into());
     }

@@ -1,6 +1,6 @@
 [package]
 name = "spm-ocr"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 license = "MIT"
 authors = ["Vadym Stupakov <vadim.stupakov@gmail.com>"]
@@ -16,6 +16,7 @@ serde_json = "1"
 serde_path_to_error = "0.1"
 thiserror = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
