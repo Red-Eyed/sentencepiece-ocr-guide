@@ -47,25 +47,25 @@ If you read nothing else:
 ## Quick reference
 
 ```bash
-spm-ocr train corpus/ \
-  --model-prefix ocr_tokenizer \
-  --lines 20000000 \
-  --alpha 0.3 \
-  --memory-budget-gb 32 \
-  --training-temp-dir /path/to/scratch \
-  --keep-training-file \
-  --user-defined-symbols-file latex-symbols.txt
+spm-ocr train --config cfg.json
+# or:
+just train cfg.json
 ```
+
+Start from [`cfg.json.example`](cfg.json.example). Config mode is strict: every key in the
+example must be present, unknown keys fail, and command-line training flags conflict with
+`--config` so a misspelled or misplaced parameter cannot be silently skipped.
 
 The command scans the corpus first, memory-maps source files, applies the same canonicalization
 rules the guide validates, balances writing systems with α-smoothing, writes a bounded prepared
 training sample, then invokes the official SentencePiece trainer. Math-like lines are detected
 and reported, but they are not given a separate balancing bucket by default; broad OCR corpora
-usually should not let a small amount of LaTeX distort the text tokenizer. Use `--balance-math`
-with `--math-max-share` for math-heavy deployments.
+usually should not let a small amount of LaTeX distort the text tokenizer. Set
+`"balance_math": true` with `"math_max_share"` for math-heavy deployments.
 
 The default trainer backend is `uv run python` with the project `sentencepiece` dependency; an
-external binary is available with `--trainer-backend spm-train --spm-train /path/to/spm_train`.
+external binary is available by setting `"trainer_backend": "spm-train"` and `"spm_train"` in
+the config.
 
 The prepared training sample is a real temporary file, not a FIFO. SentencePiece reads its input
 more than once, so a named pipe can hang. Pass `--keep-training-file` to retain the exact file
@@ -108,17 +108,13 @@ validate the artifact afterwards.
 ### Pilot: check the shape before spending compute
 
 ```bash
-spm-ocr train corpus/ \
-  --model-prefix pilots/ocr_pilot \
-  --lines 2000000 \
-  --alpha 0.5 \
-  --training-temp-dir scratch/ \
-  --keep-training-file
+spm-ocr train --config cfg.json
 ```
 
 This is the run to do first. It scans the corpus, reports raw defects, prepares a 2M-line
 training sample, keeps that exact sample on disk, trains a tokenizer, and then checks the
-resulting `.model`. `--alpha 0.5` is moderate script balancing: enough to lift tails, not as
+resulting `.model`. Set `"lines": 2000000`, `"model_prefix": "pilots/ocr_pilot"` and
+`"alpha": 0.5` in the config. `0.5` is moderate script balancing: enough to lift tails, not as
 aggressive as the guide's strong `0.3` default from multilingual LM work.
 
 Read the `training_buckets` finding before trusting the tokenizer. It tells you how many lines
@@ -127,15 +123,7 @@ were eligible in each script bucket and how many were selected.
 ### Broad OCR tokenizer: script-balanced text
 
 ```bash
-spm-ocr train corpus/ \
-  --model-prefix ocr_tokenizer \
-  --vocab-size 40000 \
-  --lines 20000000 \
-  --alpha 0.5 \
-  --training-temp-dir scratch/ \
-  --keep-training-file \
-  --spm-threads 16 \
-  --jobs 16
+spm-ocr train --config cfg.json --jobs 16
 ```
 
 This is the default production-shaped command for mostly-text OCR. Buckets are dominant writing
@@ -198,32 +186,25 @@ _
 ### External SentencePiece binary
 
 ```bash
-spm-ocr train corpus/ \
-  --model-prefix ocr_tokenizer \
-  --trainer-backend spm-train \
-  --spm-train /opt/homebrew/bin/spm_train \
-  --training-temp-dir scratch/
+spm-ocr train --config cfg.json
 ```
 
 The default backend uses `uv run python` and the project `sentencepiece` dependency. This
-variant uses an installed `spm_train` executable instead. The corpus preparation and validation
-are identical; only the final trainer invocation changes.
+variant uses an installed `spm_train` executable instead. Set `"trainer_backend": "spm-train"`
+and `"spm_train": "/opt/homebrew/bin/spm_train"` in the config. The corpus preparation and
+validation are identical; only the final trainer invocation changes.
 
 ### Lossy data triage
 
 ```bash
-spm-ocr train corpus/ \
-  --model-prefix ocr_tokenizer_triage \
-  --drop-invalid \
-  --drop-long-lines \
-  --training-temp-dir scratch/ \
-  --keep-training-file
+spm-ocr train --config cfg.json
 ```
 
 This is for triage, not a clean production tokenizer. Invalid UTF-8 and over-length lines are
 data loss. The defaults refuse them because bad bytes and very long lines usually identify an
-extractor problem or exactly the hard examples you wanted to train on. Use these flags only when
-you have decided losing those lines is better than blocking the run.
+extractor problem or exactly the hard examples you wanted to train on. Set `"drop_invalid": true`
+and `"drop_long_lines": true` only when you have decided losing those lines is better than
+blocking the run.
 
 ## The two checklists
 
