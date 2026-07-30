@@ -18,6 +18,7 @@ wheels/
 *.model
 *.vocab
 corpora/
+tests/output/
 /target
 
 # ...except the test fixtures. Training them needs a SentencePiece trainer, which this project

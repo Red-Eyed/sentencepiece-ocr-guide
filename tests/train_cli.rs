@@ -5,6 +5,20 @@ use std::process::Command;
 
 use serde_json::json;
 
+fn output_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("output")
+        .join("train_cli")
+}
+
+fn reset_output_dir(path: &Path) {
+    if path.exists() {
+        std::fs::remove_dir_all(path).expect("clear previous train_cli output");
+    }
+    std::fs::create_dir_all(path).expect("create train_cli output dir");
+}
+
 fn path_string(path: &Path) -> String {
     path.to_str()
         .expect("test paths should be UTF-8")
@@ -91,12 +105,14 @@ fn assert_success(output: std::process::Output) {
 
 #[test]
 fn train_command_trains_a_tokenizer_from_generated_text() {
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let corpus_dir = temp.path().join("corpus");
-    let scratch_dir = temp.path().join("scratch");
-    let symbols = temp.path().join("symbols.txt");
-    let config = temp.path().join("cfg.json");
-    let model_prefix = temp.path().join("ocr_tokenizer");
+    let output_dir = output_dir();
+    reset_output_dir(&output_dir);
+
+    let corpus_dir = output_dir.join("corpus");
+    let scratch_dir = output_dir.join("scratch");
+    let symbols = output_dir.join("symbols.txt");
+    let config = output_dir.join("cfg.json");
+    let model_prefix = output_dir.join("ocr_tokenizer");
 
     std::fs::create_dir_all(&scratch_dir).expect("create scratch dir");
     write_generated_corpus(&corpus_dir);
@@ -110,7 +126,7 @@ fn train_command_trains_a_tokenizer_from_generated_text() {
         .arg(&config)
         .arg("--fail-on")
         .arg("blocker")
-        .env("UV_CACHE_DIR", temp.path().join("uv-cache"))
+        .env("UV_CACHE_DIR", output_dir.join("uv-cache"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run train command");
