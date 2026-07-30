@@ -17,7 +17,7 @@
   "spm_threads": 16,
   "trainer_backend": "uv-python",
   "spm_train": "spm_train",
-  "decide": [],
+  "decide": ["soft_hyphen_line_final", "soft_hyphen_mid_line"],
   "drop_invalid": false,
   "drop_long_lines": false,
   "user_defined_symbols": [],

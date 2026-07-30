@@ -199,7 +199,7 @@ fn train_tokenizer(args: &TrainOptions, rust_jobs: Option<usize>) -> Result<Repo
         .findings
         .push(Finding::passed("spm_train_args", trainer_summary(args, &settings)).about(6));
 
-    run_sentencepiece(
+    let artifacts = run_sentencepiece(
         &found.sources,
         &plan,
         &canonicalizer,
@@ -208,9 +208,10 @@ fn train_tokenizer(args: &TrainOptions, rust_jobs: Option<usize>) -> Result<Repo
         &user_symbols,
         rust_jobs,
     )?;
+    report.findings.push(training_artifact_report(&artifacts));
 
     step("reading the trained model…");
-    let artifact = artifact::load(&sentencepiece_model_path(&args.model_prefix))?;
+    let artifact = artifact::load(&artifacts.model_path)?;
     report.extend(suite::check(&artifact, &suite::Options::default()));
     report
         .findings
@@ -482,7 +483,7 @@ fn run_sentencepiece(
     args: &TrainOptions,
     user_symbols: &[String],
     rust_jobs: Option<usize>,
-) -> Result<()> {
+) -> Result<TrainingArtifacts> {
     let mut input = prepared_training_file(args)?;
     let input_path = input.path().to_path_buf();
     {
@@ -504,11 +505,28 @@ fn run_sentencepiece(
         bail!("spm_train exited with {status}");
     }
 
-    if args.keep_training_file {
+    let training_input = if args.keep_training_file {
         let kept = input.keep().map_err(|error| error.error)?;
         note_line(&format!("kept training input: {}", kept.1.display()));
-    }
-    Ok(())
+        Some(kept.1)
+    } else {
+        None
+    };
+
+    let artifacts = TrainingArtifacts {
+        model_path: sentencepiece_model_path(&args.model_prefix),
+        vocab_path: sentencepiece_vocab_path(&args.model_prefix),
+        training_input,
+    };
+    note_line(&format!(
+        "wrote tokenizer model: {}",
+        artifacts.model_path.display()
+    ));
+    note_line(&format!(
+        "wrote tokenizer vocab: {}",
+        artifacts.vocab_path.display()
+    ));
+    Ok(artifacts)
 }
 
 fn prepared_training_file(args: &TrainOptions) -> Result<tempfile::NamedTempFile> {
@@ -517,6 +535,29 @@ fn prepared_training_file(args: &TrainOptions) -> Result<tempfile::NamedTempFile
             .with_context(|| format!("creating temporary file in {}", directory.display())),
         None => tempfile::NamedTempFile::new().context("creating temporary training file"),
     }
+}
+
+#[derive(Debug, Clone)]
+struct TrainingArtifacts {
+    model_path: PathBuf,
+    vocab_path: PathBuf,
+    training_input: Option<PathBuf>,
+}
+
+fn training_artifact_report(artifacts: &TrainingArtifacts) -> Finding {
+    let mut evidence = vec![
+        format!("model: {}", artifacts.model_path.display()),
+        format!("vocab: {}", artifacts.vocab_path.display()),
+    ];
+    if let Some(path) = &artifacts.training_input {
+        evidence.push(format!("prepared corpus: {}", path.display()));
+    }
+
+    Finding::passed(
+        "tokenizer_artifacts",
+        "SentencePiece wrote tokenizer artifacts",
+    )
+    .with_evidence(evidence)
 }
 
 fn trainer_command(
@@ -694,12 +735,21 @@ fn user_defined_symbols(args: &TrainOptions) -> Result<Vec<String>> {
 }
 
 fn sentencepiece_model_path(prefix: &Path) -> PathBuf {
+    sentencepiece_output_path(prefix, "model")
+}
+
+fn sentencepiece_vocab_path(prefix: &Path) -> PathBuf {
+    sentencepiece_output_path(prefix, "vocab")
+}
+
+fn sentencepiece_output_path(prefix: &Path, extension: &str) -> PathBuf {
     let mut path = PathBuf::from(prefix);
     let Some(name) = path.file_name() else {
-        return PathBuf::from(format!("{}.model", prefix.display()));
+        return PathBuf::from(format!("{}.{extension}", prefix.display()));
     };
     let mut file_name = name.to_os_string();
-    file_name.push(".model");
+    file_name.push(".");
+    file_name.push(extension);
     path.set_file_name(file_name);
     path
 }

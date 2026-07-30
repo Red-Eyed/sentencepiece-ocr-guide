@@ -117,6 +117,8 @@ The example config is meant to cover most multilingual on-device OCR runs. It sa
 uses a 40K BPE vocabulary, preserves byte fallback, splits digits and Unicode scripts, protects
 common LaTeX/math symbols from [`latex-symbols.txt.example`](latex-symbols.txt.example), and
 caps math-like lines at 5% so formulas are represented without taking over the tokenizer.
+It also applies the two soft-hyphen preprocessing decisions in-stream: mid-line soft hyphens are
+removed, while line-final soft hyphens become visible hyphens.
 
 Edit `"paths"` and `"model_prefix"` first. The other fields are explicit so typos and accidental
 omissions fail before training starts. Unknown JSON keys fail too.
@@ -130,6 +132,7 @@ The train command does the full pipeline:
 - writes a bounded shuffled training file under `"training_temp_dir"`
 - runs the official SentencePiece trainer
 - reads the trained `.model` and reports artifact checks
+- prints the exact `.model`, `.vocab`, and kept prepared corpus paths in the final report
 
 The Rust side is memory-bounded: source files are memory-mapped, accepted lines flow through a
 bounded shuffle buffer, and the selected sample is written to scratch storage for SentencePiece

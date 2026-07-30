@@ -5,6 +5,8 @@ use std::process::Command;
 
 use serde_json::json;
 
+const SOFT_HYPHEN: char = '\u{00AD}';
+
 fn output_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -39,6 +41,9 @@ fn write_generated_corpus(corpus_dir: &Path) {
         lines.push(format!("صفحة {index} مجموع 24680 نص عربي واضح"));
         lines.push(format!("पृष्ठ {index} कुल 13579 देवनागरी पाठ"));
         lines.push(format!("第{index}頁 合計 11223 漢字かな OCR"));
+        lines.push(format!(
+            "hyphenated wei{SOFT_HYPHEN}ter and wrapped line{SOFT_HYPHEN}"
+        ));
         if index % 5 == 0 {
             lines.push(format!(
                 "formula {index} \\frac {{ a _ {index} }} {{ b }} + \\sum"
@@ -79,7 +84,7 @@ fn write_config(
         "spm_threads": 1,
         "trainer_backend": "uv-python",
         "spm_train": "spm_train",
-        "decide": [],
+        "decide": ["soft_hyphen_line_final", "soft_hyphen_mid_line"],
         "drop_invalid": false,
         "drop_long_lines": false,
         "user_defined_symbols": [],
@@ -93,7 +98,7 @@ fn write_config(
     .expect("write config");
 }
 
-fn assert_success(output: std::process::Output) {
+fn assert_success(output: &std::process::Output) {
     assert!(
         output.status.success(),
         "train command failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
@@ -131,7 +136,21 @@ fn train_command_trains_a_tokenizer_from_generated_text() {
         .output()
         .expect("run train command");
 
-    assert_success(output);
+    assert_success(&output);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("tokenizer_artifacts"),
+        "report should name written artifacts\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&path_string(&model_prefix.with_extension("model"))),
+        "report should include model path\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("prepared corpus:"),
+        "report should include kept prepared corpus path\nstdout:\n{stdout}"
+    );
     assert!(model_prefix.with_extension("model").is_file());
     assert!(model_prefix.with_extension("vocab").is_file());
     assert!(
