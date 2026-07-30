@@ -4,6 +4,7 @@ mod corpus;
 mod normalize;
 mod progress;
 mod repair;
+mod trainer;
 
 use std::process::ExitCode;
 

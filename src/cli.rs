@@ -8,6 +8,7 @@ use crate::config::{self, EffectiveConfig};
 use crate::corpus::{self, DiscoveredCorpus};
 use crate::progress::ProgressReporter;
 use crate::repair::{self, RepairSummary};
+use crate::trainer::{self, TrainerOutput};
 
 #[derive(Debug, Parser)]
 #[command(name = "spm-ocr", version, about)]
@@ -42,6 +43,9 @@ struct TrainSummary {
     lines_written: u64,
     lines_fixed: u64,
     lines_skipped: u64,
+    model: PathBuf,
+    vocab: PathBuf,
+    trainer_output: PathBuf,
     work_dir: PathBuf,
     model_prefix: String,
 }
@@ -59,19 +63,20 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
     let config = load_config(&args, &progress)?;
     let corpus = discover_corpus(&config, &progress)?;
     let repair = repair_corpus(&config, &corpus, &progress)?;
-    let summary = TrainSummary::from_config_and_repair(&config, &corpus, &repair);
+    let trainer = train_sentencepiece(&config, &repair, &progress)?;
+    let summary = TrainSummary::from_outputs(&config, &corpus, &repair, &trainer);
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
         println!(
-            "Prepared: preset `{}`, {} text file(s), {} line(s) written, {} fixed, {} skipped, output `{}`",
+            "Trained: preset `{}`, {} text file(s), {} line(s) written, {} fixed, {} skipped, model `{}`",
             summary.preset,
             summary.text_files,
             summary.lines_written,
             summary.lines_fixed,
             summary.lines_skipped,
-            summary.work_dir.display()
+            summary.model.display()
         );
     }
 
@@ -111,11 +116,20 @@ fn repair_corpus(
         .with_context(|| format!("could not repair {}", config.corpus.path.display()))
 }
 
+fn train_sentencepiece(
+    config: &EffectiveConfig,
+    repair: &RepairSummary,
+    progress: &ProgressReporter,
+) -> Result<TrainerOutput> {
+    trainer::train_sentencepiece(config, repair, progress).context("could not train SentencePiece")
+}
+
 impl TrainSummary {
-    fn from_config_and_repair(
+    fn from_outputs(
         config: &EffectiveConfig,
         corpus: &DiscoveredCorpus,
         repair: &RepairSummary,
+        trainer: &TrainerOutput,
     ) -> Self {
         Self {
             preset: config.preset.clone(),
@@ -127,6 +141,9 @@ impl TrainSummary {
             lines_written: repair.lines_written,
             lines_fixed: repair.lines_fixed,
             lines_skipped: repair.lines_skipped,
+            model: trainer.model.clone(),
+            vocab: trainer.vocab.clone(),
+            trainer_output: config.output.work_dir.join("trainer_output.json"),
             work_dir: config.output.work_dir.clone(),
             model_prefix: config.output.model_prefix.clone(),
         }
