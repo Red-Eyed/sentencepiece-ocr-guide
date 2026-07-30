@@ -1,6 +1,6 @@
 [package]
 name = "spm-ocr"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Train a SentencePiece tokenizer for multilingual OCR with preprocessing and validation"

@@ -74,7 +74,12 @@ fn next_steps(report: &Report) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut lines = vec![String::new(), "Next:".to_string()];
+    let heading = if tokenizer_artifacts_written(report) {
+        "Tokenizer artifacts were written; remaining fixes before trusting/retraining:"
+    } else {
+        "Next:"
+    };
+    let mut lines = vec![String::new(), heading.to_string()];
     for (index, remedy) in remedies.iter().enumerate() {
         lines.push(format!("  {}. {}", index + 1, remedy.next_step()));
     }
@@ -82,6 +87,13 @@ fn next_steps(report: &Report) -> Vec<String> {
         lines.push("  (in that order — a corpus defect survives any number of retrains)".into());
     }
     lines
+}
+
+fn tokenizer_artifacts_written(report: &Report) -> bool {
+    report
+        .findings
+        .iter()
+        .any(|finding| finding.check == "tokenizer_artifacts" && finding.status == Status::Passed)
 }
 
 #[cfg(test)]
@@ -128,6 +140,29 @@ mod tests {
 
         assert!(corpus < retrain);
         assert!(text.contains("survives any number of retrains"));
+    }
+
+    #[test]
+    fn artifact_runs_label_remaining_work_as_cleanup() {
+        let report = Report::new(vec![
+            Finding::passed("tokenizer_artifacts", "wrote files"),
+            Finding::failed("data", "y").graded(Severity::Blocker, Remedy::FixCorpus),
+        ]);
+        let text = as_text(&report);
+
+        assert!(text.contains("Tokenizer artifacts were written"));
+        assert!(!text.contains("\nNext:\n"));
+        assert!(text.contains("canonicalize the corpus"));
+    }
+
+    #[test]
+    fn blocked_runs_still_show_next() {
+        let report = Report::new(vec![
+            Finding::failed("data", "y").graded(Severity::Blocker, Remedy::FixCorpus),
+        ]);
+        let text = as_text(&report);
+
+        assert!(text.contains("\nNext:\n"));
     }
 
     #[test]
