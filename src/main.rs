@@ -19,12 +19,11 @@ use serde_json::json;
 use spm_ocr::corpus::axis::{Action, default_axes};
 use spm_ocr::corpus::balance;
 use spm_ocr::corpus::canonical::Canonicalizer;
-use spm_ocr::corpus::rewrite::{OnInvalidUtf8, Tally, rewrite_file};
 use spm_ocr::corpus::scan;
 use spm_ocr::corpus::source::{Discovery, Source, discover};
 use spm_ocr::crosscheck;
 use spm_ocr::format::count;
-use spm_ocr::model::{artifact, pieces, suite};
+use spm_ocr::model::{artifact, suite};
 use spm_ocr::render;
 use spm_ocr::report::{Finding, Remedy, Report, Severity};
 use spm_ocr::train::{self, PrepareOptions};
@@ -38,145 +37,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scan corpus files for encoding axes that vary between sources.
-    Corpus {
-        /// Corpus files or directories (directories are walked recursively).
-        #[arg(required = true)]
-        paths: Vec<PathBuf>,
-
-        #[command(flatten)]
-        output: OutputArgs,
-    },
-
-    /// Rewrite corpus files into canonical form, then re-scan to verify the result.
-    Canonicalize {
-        /// Corpus files or directories (directories are walked recursively).
-        #[arg(required = true)]
-        paths: Vec<PathBuf>,
-
-        #[command(flatten)]
-        destination: DestinationArgs,
-
-        /// DECIDE axes to apply, e.g. soft_hyphen_line_final. Measure with `corpus` first.
-        #[arg(long)]
-        decide: Vec<String>,
-
-        /// Skip lines that are not valid UTF-8 instead of refusing. Loses data.
-        #[arg(long)]
-        drop_invalid: bool,
-
-        #[command(flatten)]
-        output: OutputArgs,
-    },
-
-    /// Check a trained tokenizer against the guide's checklist.
-    Model {
-        /// The trained `.model` file.
-        model: PathBuf,
-
-        #[command(flatten)]
-        tuning: ModelArgs,
-
-        #[command(flatten)]
-        output: OutputArgs,
-    },
-
-    /// Both checklists at once, corpus findings first.
-    All {
-        /// The trained `.model` file.
-        model: PathBuf,
-
-        /// Corpus files or directories the model was trained on.
-        #[arg(long, required = true)]
-        corpus: Vec<PathBuf>,
-
-        #[command(flatten)]
-        tuning: ModelArgs,
-
-        #[command(flatten)]
-        output: OutputArgs,
-    },
-
-    /// Stream a canonical, balanced training sample into the official SentencePiece trainer.
+    /// Train with preprocessing, balancing, SentencePiece, and post-train checks.
     Train {
-        /// Corpus files or directories (directories are walked recursively).
-        paths: Vec<PathBuf>,
-
         #[command(flatten)]
-        args: Box<TrainArgs>,
+        args: TrainArgs,
 
         #[command(flatten)]
         output: OutputArgs,
     },
-}
-
-#[derive(clap::Args)]
-struct ModelArgs {
-    /// Longest digit-only piece to allow.
-    #[arg(long, default_value_t = pieces::DEFAULT_MAX_DIGIT_PIECE_LENGTH)]
-    max_digit_piece_length: usize,
-
-    /// Allow a digit fusing with a letter, e.g. `3D`, instead of calling it a cross-script merge.
-    #[arg(long)]
-    allow_digit_letter_pieces: bool,
-}
-
-impl ModelArgs {
-    fn options(&self) -> suite::Options {
-        suite::Options {
-            max_digit_piece_length: self.max_digit_piece_length,
-            digits_are_a_script: !self.allow_digit_letter_pieces,
-        }
-    }
-}
-
-/// Where canonicalized output goes.
-///
-/// A clap group rather than two loose flags, so "both" and "neither" are rejected at parse time.
-/// Overwriting the input is never the default: a corpus is expensive to reassemble, and a
-/// canonicalizer configured with the wrong `--decide` axes is not obviously wrong afterwards.
-#[derive(clap::Args)]
-#[group(required = true, multiple = false)]
-struct DestinationArgs {
-    /// Directory to write canonicalized copies into, mirroring the input tree.
-    #[arg(long, value_name = "DIR")]
-    out: Option<PathBuf>,
-
-    /// Overwrite the input files in place.
-    #[arg(long)]
-    in_place: bool,
-}
-
-enum Destination {
-    Out(PathBuf),
-    InPlace,
-}
-
-impl DestinationArgs {
-    fn resolve(&self) -> Destination {
-        match &self.out {
-            Some(directory) => Destination::Out(directory.clone()),
-            // The group above guarantees `--in-place` when `--out` is absent.
-            None => Destination::InPlace,
-        }
-    }
-}
-
-impl Destination {
-    /// Where `source` should be written, creating any directory it needs.
-    fn target(&self, source: &Source) -> Result<PathBuf> {
-        match self {
-            Destination::InPlace => Ok(source.path().to_path_buf()),
-            Destination::Out(directory) => {
-                // Mirror the input tree, so a recursive run does not flatten shards together.
-                let path = directory.join(source.relative());
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                Ok(path)
-            }
-        }
-    }
 }
 
 #[derive(clap::Args)]
@@ -197,123 +65,8 @@ struct OutputArgs {
 #[derive(clap::Args)]
 struct TrainArgs {
     /// Strict JSON training config. Unknown or missing keys fail.
-    #[arg(
-        long,
-        value_name = "FILE",
-        conflicts_with_all = [
-            "model_prefix",
-            "lines",
-            "alpha",
-            "seed",
-            "vocab_size",
-            "character_coverage",
-            "max_sentence_length",
-            "max_sentencepiece_length",
-            "shuffle_buffer_lines",
-            "memory_budget_gb",
-            "training_temp_dir",
-            "keep_training_file",
-            "balance_math",
-            "math_max_share",
-            "spm_threads",
-            "trainer_backend",
-            "spm_train",
-            "decide",
-            "drop_invalid",
-            "drop_long_lines",
-            "user_defined_symbol",
-            "user_defined_symbols_file",
-        ]
-    )]
-    config: Option<PathBuf>,
-
-    /// Output prefix. SentencePiece writes `<prefix>.model` and `<prefix>.vocab`.
-    #[arg(long)]
-    model_prefix: Option<PathBuf>,
-
-    /// Target number of sampled training lines to stream.
-    #[arg(long, default_value_t = 20_000_000)]
-    lines: u64,
-
-    /// Alpha for smoothing bucket shares: P'(bucket) ∝ P(bucket)^alpha.
-    #[arg(long, default_value_t = 0.3)]
-    alpha: f64,
-
-    /// Deterministic seed for sampling and bounded shuffling.
-    #[arg(long, default_value_t = 13)]
-    seed: u64,
-
-    /// SentencePiece vocabulary size.
-    #[arg(long, alias = "vocab_size", default_value_t = 40_000)]
-    vocab_size: u32,
-
-    /// Character coverage for SentencePiece.
-    #[arg(long, default_value_t = 0.9998)]
-    character_coverage: f64,
-
-    /// Maximum line length in bytes after canonicalization.
-    #[arg(long, default_value_t = 16_384)]
-    max_sentence_length: usize,
-
-    /// Maximum learned piece length.
-    #[arg(long, default_value_t = 8)]
-    max_sentencepiece_length: usize,
-
-    /// Lines held by Rust's bounded shuffle buffer.
-    #[arg(long, default_value_t = 100_000)]
-    shuffle_buffer_lines: usize,
-
-    /// Hard upper bound for Rust-side shuffle memory, in GiB.
-    #[arg(long, default_value_t = 32)]
-    memory_budget_gb: u64,
-
-    /// Directory for the temporary prepared training file. Defaults to the system temp dir.
-    #[arg(long)]
-    training_temp_dir: Option<PathBuf>,
-
-    /// Keep the prepared SentencePiece input file instead of deleting it after training.
-    #[arg(long)]
-    keep_training_file: bool,
-
-    /// Give math-like lines their own balancing bucket. Off by default for broad OCR.
-    #[arg(long)]
-    balance_math: bool,
-
-    /// Maximum selected-line share for the math bucket when `--balance-math` is enabled.
-    #[arg(long, default_value_t = 0.10)]
-    math_max_share: f64,
-
-    /// Worker threads for SentencePiece. Defaults to Rust worker count when set, otherwise 16.
-    #[arg(long)]
-    spm_threads: Option<usize>,
-
-    /// SentencePiece trainer backend.
-    #[arg(long, value_enum, default_value_t = TrainerBackend::UvPython)]
-    trainer_backend: TrainerBackend,
-
-    /// Path to the official `spm_train` binary, when using `--trainer-backend spm-train`.
-    #[arg(long, default_value = "spm_train")]
-    spm_train: PathBuf,
-
-    /// DECIDE axes to apply while preparing training data.
-    #[arg(long)]
-    decide: Vec<String>,
-
-    /// Skip lines that are not valid UTF-8 instead of refusing. Loses data.
-    #[arg(long)]
-    drop_invalid: bool,
-
-    /// Skip lines above `--max-sentence-length` instead of refusing. Loses hard examples.
-    #[arg(long)]
-    drop_long_lines: bool,
-
-    /// User-defined symbol to pass to SentencePiece. Repeat for multiple symbols.
-    #[arg(long)]
-    user_defined_symbol: Vec<String>,
-
-    /// File containing one user-defined symbol per line.
-    #[arg(long)]
-    user_defined_symbols_file: Option<PathBuf>,
+    #[arg(long, value_name = "FILE")]
+    config: PathBuf,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, ValueEnum)]
@@ -349,90 +102,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Corpus { paths, output } => {
+        Command::Train { args, output } => {
             configure_threads(output.jobs)?;
-            let report = scan_corpus(&paths);
-            emit(&report, &output);
-            std::process::exit(report.exit_code(output.fail_on.into()));
-        }
-
-        Command::Canonicalize {
-            paths,
-            destination,
-            decide,
-            drop_invalid,
-            output,
-        } => {
-            configure_threads(output.jobs)?;
-            let report =
-                canonicalize_corpus(&paths, &destination.resolve(), &decide, drop_invalid)?;
-            emit(&report, &output);
-            std::process::exit(report.exit_code(output.fail_on.into()));
-        }
-
-        Command::Model {
-            model,
-            tuning,
-            output,
-        } => {
-            let report = check_model(&model, &tuning.options())?;
-            emit(&report, &output);
-            std::process::exit(report.exit_code(output.fail_on.into()));
-        }
-
-        Command::All {
-            model,
-            corpus,
-            tuning,
-            output,
-        } => {
-            configure_threads(output.jobs)?;
-            let report = check_both(&model, &corpus, &tuning.options())?;
-
-            emit(&report, &output);
-            std::process::exit(report.exit_code(output.fail_on.into()));
-        }
-
-        Command::Train {
-            paths,
-            args,
-            output,
-        } => {
-            configure_threads(output.jobs)?;
-            let args = args.resolve(&paths)?;
+            let args = TrainConfig::read(&args.config)?.into_options()?;
             let report = train_tokenizer(&args, output.jobs)?;
             emit(&report, &output);
             std::process::exit(report.exit_code(output.fail_on.into()));
         }
     }
-}
-
-fn check_model(path: &Path, options: &suite::Options) -> Result<Report> {
-    step("reading the model…");
-    let artifact = artifact::load(path)?;
-    Ok(suite::check(&artifact, options))
-}
-
-/// Both checklists, plus the checks that need them together.
-///
-/// The model is read *first*, even though its findings are reported last. It records the
-/// `max_sentence_length` the corpus must be measured against, and scanning before knowing it
-/// would mean measuring against a default the trainer will not use.
-fn check_both(model: &Path, corpus: &[PathBuf], options: &suite::Options) -> Result<Report> {
-    step("reading the model…");
-    let artifact = artifact::load(model)?;
-
-    let axes = default_axes();
-    let limit = crosscheck::line_limit(&artifact).unwrap_or(scan::DEFAULT_MAX_LINE_BYTES);
-    let config = scan::Config::new(&axes).with_max_line_bytes(limit);
-
-    // Corpus first in the report: several model defects originate in the data, and leading with
-    // the model would invite a retrain which reproduces the defect exactly.
-    let (mut report, combined) = scan_corpus_with(corpus, &config);
-    report.extend(suite::check(&artifact, options));
-    report.extend(crosscheck::check(&combined, &artifact, limit));
-
-    Ok(report)
 }
 
 /// Size rayon's pool once, up front. Left to rayon's own default when unset — its work-stealing
@@ -444,80 +121,6 @@ fn configure_threads(jobs: Option<usize>) -> Result<()> {
             .build_global()?;
     }
     Ok(())
-}
-
-/// Scan a corpus, returning the report and the combined counts the cross-check needs.
-///
-/// `long_lines` is deliberately not added here: on its own the scan can only measure against
-/// SentencePiece's default, while `all` measures against the model's actual limit. Whichever
-/// caller knows the better number emits the finding, so it is never reported twice.
-fn scan_corpus_with(paths: &[PathBuf], config: &scan::Config) -> (Report, scan::Counts) {
-    step("discovering files…");
-    let found = discover(paths);
-
-    if let Some(note) = found.summarize_skipped(3) {
-        note_line(&note);
-    }
-
-    let totals = scan_with_progress(&found, config);
-    let combined = scan::combined(&totals);
-
-    let mut report = scan::report(&totals, config.axes);
-    report
-        .findings
-        .push(balance::script_balance(&combined).about(13));
-    // Per source rather than combined: which extractor disagrees is the actionable part.
-    report
-        .findings
-        .push(balance::normalization_forms(&totals).about(4));
-
-    (report, combined)
-}
-
-/// The `corpus` subcommand: no model, so the line limit is SentencePiece's default.
-fn scan_corpus(paths: &[PathBuf]) -> Report {
-    let axes = default_axes();
-    let (limit, source) = balance::default_limit();
-    let config = scan::Config::new(&axes).with_max_line_bytes(limit);
-
-    let (mut report, combined) = scan_corpus_with(paths, &config);
-    report
-        .findings
-        .push(balance::long_lines(&combined, limit, source).about(15));
-    report
-}
-
-/// Rewrite every source, then scan what was written.
-///
-/// The re-scan is the point rather than a courtesy: canonicalizing is only established as having
-/// worked if the output is observed to be clean, and a wrong `--decide` set is not otherwise
-/// visible afterwards.
-fn canonicalize_corpus(
-    paths: &[PathBuf],
-    destination: &Destination,
-    decide: &[String],
-    drop_invalid: bool,
-) -> Result<Report> {
-    step("discovering files…");
-    let found = discover(paths);
-
-    if let Some(note) = found.summarize_skipped(3) {
-        note_line(&note);
-    }
-
-    let canonicalizer = Canonicalizer::new(default_axes(), decide)?;
-    let on_invalid = if drop_invalid {
-        OnInvalidUtf8::Drop
-    } else {
-        OnInvalidUtf8::Refuse
-    };
-
-    let written = rewrite_with_progress(&found, destination, &canonicalizer, on_invalid)?;
-
-    let axes = default_axes();
-    let config = scan::Config::new(&axes);
-    let totals = scan_with_progress(&discover(&written), &config);
-    Ok(scan::report(&totals, &axes))
 }
 
 fn train_tokenizer(args: &TrainOptions, rust_jobs: Option<usize>) -> Result<Report> {
@@ -672,50 +275,6 @@ struct TrainConfig {
     user_defined_symbols: Vec<String>,
     #[serde(deserialize_with = "required_option")]
     user_defined_symbols_file: Option<PathBuf>,
-}
-
-impl TrainArgs {
-    fn resolve(&self, paths: &[PathBuf]) -> Result<TrainOptions> {
-        if let Some(config) = &self.config {
-            if !paths.is_empty() {
-                bail!("--config reads paths from JSON; remove positional training paths");
-            }
-            return TrainConfig::read(config)?.into_options();
-        }
-
-        let Some(model_prefix) = &self.model_prefix else {
-            bail!("spm-ocr train requires --model-prefix, or --config to read one from JSON");
-        };
-        if paths.is_empty() {
-            bail!("spm-ocr train requires at least one path, or --config to read paths from JSON");
-        }
-
-        Ok(TrainOptions {
-            paths: paths.to_vec(),
-            model_prefix: model_prefix.clone(),
-            lines: self.lines,
-            alpha: self.alpha,
-            seed: self.seed,
-            vocab_size: self.vocab_size,
-            character_coverage: self.character_coverage,
-            max_sentence_length: self.max_sentence_length,
-            max_sentencepiece_length: self.max_sentencepiece_length,
-            shuffle_buffer_lines: self.shuffle_buffer_lines,
-            memory_budget_gb: self.memory_budget_gb,
-            training_temp_dir: self.training_temp_dir.clone(),
-            keep_training_file: self.keep_training_file,
-            balance_math: self.balance_math,
-            math_max_share: self.math_max_share,
-            spm_threads: self.spm_threads,
-            trainer_backend: self.trainer_backend,
-            spm_train: self.spm_train.clone(),
-            decide: self.decide.clone(),
-            drop_invalid: self.drop_invalid,
-            drop_long_lines: self.drop_long_lines,
-            user_defined_symbol: self.user_defined_symbol.clone(),
-            user_defined_symbols_file: self.user_defined_symbols_file.clone(),
-        })
-    }
 }
 
 impl TrainConfig {
@@ -1145,39 +704,6 @@ fn sentencepiece_model_path(prefix: &Path) -> PathBuf {
     path
 }
 
-fn rewrite_with_progress(
-    found: &Discovery,
-    destination: &Destination,
-    canonicalizer: &Canonicalizer,
-    on_invalid: OnInvalidUtf8,
-) -> Result<Vec<PathBuf>> {
-    // Targets first, and sequentially: this is the step that creates directories, and settling
-    // them up front leaves the parallel pass below writing to distinct, already-existing places.
-    let targets: Vec<PathBuf> = found
-        .sources
-        .iter()
-        .map(|source| destination.target(source))
-        .collect::<Result<_>>()?;
-
-    let bar = byte_bar(found.total_bytes(), "canonicalizing");
-    let tallies: Vec<(String, Tally)> = found
-        .sources
-        .par_iter()
-        .zip(targets.par_iter())
-        .map(|(source, target)| -> Result<(String, Tally)> {
-            let tally = rewrite_file(source, target, canonicalizer, on_invalid)?;
-            bar.inc(source.size_bytes());
-            Ok((source.label(), tally))
-        })
-        .collect::<Result<_>>()?;
-    bar.finish_and_clear();
-
-    for (label, tally) in &tallies {
-        note_line(&format!("{label}: {}", tally.summary()));
-    }
-    Ok(targets)
-}
-
 fn scan_with_progress(found: &Discovery, config: &scan::Config) -> scan::Totals {
     let bar = byte_bar(found.total_bytes(), "scanning");
 
@@ -1278,44 +804,20 @@ mod tests {
     }
 
     #[test]
-    fn config_conflicts_with_train_flags() {
-        let parsed =
-            Cli::try_parse_from(["spm-ocr", "train", "--config", "cfg.json", "--lines", "1"]);
+    fn train_requires_config() {
+        let parsed = Cli::try_parse_from(["spm-ocr", "train"]);
         assert!(parsed.is_err());
     }
 
     #[test]
-    fn config_rejects_positional_paths() {
-        let cli = Cli::try_parse_from(["spm-ocr", "train", "corpus/", "--config", "cfg.json"])
-            .expect("parse");
-        let Command::Train { paths, args, .. } = cli.command else {
-            panic!("expected train command");
-        };
-
-        let error = args
-            .resolve(&paths)
-            .expect_err("config owns the training paths")
-            .to_string();
-        assert!(error.contains("remove positional training paths"));
+    fn train_rejects_positional_paths() {
+        let parsed = Cli::try_parse_from(["spm-ocr", "train", "corpus/", "--config", "cfg.json"]);
+        assert!(parsed.is_err());
     }
 
     #[test]
-    fn vocab_size_alias_is_not_dropped() {
-        let cli = Cli::try_parse_from([
-            "spm-ocr",
-            "train",
-            "corpus/",
-            "--model-prefix",
-            "ocr_tokenizer",
-            "--vocab_size",
-            "1000",
-        ])
-        .expect("parse");
-        let Command::Train { paths, args, .. } = cli.command else {
-            panic!("expected train command");
-        };
-
-        let options = args.resolve(&paths).expect("valid cli options");
-        assert_eq!(options.vocab_size, 1000);
+    fn only_train_is_exposed() {
+        let parsed = Cli::try_parse_from(["spm-ocr", "corpus", "corpus/"]);
+        assert!(parsed.is_err());
     }
 }
