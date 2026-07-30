@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use serde::Deserialize;
 use serde_json::json;
 
 use spm_ocr::corpus::axis::{Action, default_axes};
@@ -99,11 +100,10 @@ enum Command {
     /// Stream a canonical, balanced training sample into the official SentencePiece trainer.
     Train {
         /// Corpus files or directories (directories are walked recursively).
-        #[arg(required = true)]
         paths: Vec<PathBuf>,
 
         #[command(flatten)]
-        args: TrainArgs,
+        args: Box<TrainArgs>,
 
         #[command(flatten)]
         output: OutputArgs,
@@ -196,9 +196,40 @@ struct OutputArgs {
 
 #[derive(clap::Args)]
 struct TrainArgs {
+    /// Strict JSON training config. Unknown or missing keys fail.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "model_prefix",
+            "lines",
+            "alpha",
+            "seed",
+            "vocab_size",
+            "character_coverage",
+            "max_sentence_length",
+            "max_sentencepiece_length",
+            "shuffle_buffer_lines",
+            "memory_budget_gb",
+            "training_temp_dir",
+            "keep_training_file",
+            "balance_math",
+            "math_max_share",
+            "spm_threads",
+            "trainer_backend",
+            "spm_train",
+            "decide",
+            "drop_invalid",
+            "drop_long_lines",
+            "user_defined_symbol",
+            "user_defined_symbols_file",
+        ]
+    )]
+    config: Option<PathBuf>,
+
     /// Output prefix. SentencePiece writes `<prefix>.model` and `<prefix>.vocab`.
     #[arg(long)]
-    model_prefix: PathBuf,
+    model_prefix: Option<PathBuf>,
 
     /// Target number of sampled training lines to stream.
     #[arg(long, default_value_t = 20_000_000)]
@@ -213,7 +244,7 @@ struct TrainArgs {
     seed: u64,
 
     /// SentencePiece vocabulary size.
-    #[arg(long, default_value_t = 40_000)]
+    #[arg(long, alias = "vocab_size", default_value_t = 40_000)]
     vocab_size: u32,
 
     /// Character coverage for SentencePiece.
@@ -285,11 +316,13 @@ struct TrainArgs {
     user_defined_symbols_file: Option<PathBuf>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, ValueEnum)]
 enum TrainerBackend {
     /// Use `uv run python` and the project `sentencepiece` dependency.
+    #[serde(rename = "uv-python", alias = "uv_python")]
     UvPython,
     /// Use an external `spm_train` executable.
+    #[serde(rename = "spm-train", alias = "spm_train")]
     SpmTrain,
 }
 
@@ -366,7 +399,8 @@ fn main() -> Result<()> {
             output,
         } => {
             configure_threads(output.jobs)?;
-            let report = train_tokenizer(&paths, &args, output.jobs)?;
+            let args = args.resolve(&paths)?;
+            let report = train_tokenizer(&args, output.jobs)?;
             emit(&report, &output);
             std::process::exit(report.exit_code(output.fail_on.into()));
         }
@@ -486,13 +520,9 @@ fn canonicalize_corpus(
     Ok(scan::report(&totals, &axes))
 }
 
-fn train_tokenizer(
-    paths: &[PathBuf],
-    args: &TrainArgs,
-    rust_jobs: Option<usize>,
-) -> Result<Report> {
+fn train_tokenizer(args: &TrainOptions, rust_jobs: Option<usize>) -> Result<Report> {
     step("discovering files…");
-    let found = discover(paths);
+    let found = discover(&args.paths);
     if found.is_empty() {
         bail!("no training sources found");
     }
@@ -586,7 +616,161 @@ fn train_tokenizer(
     Ok(report)
 }
 
-fn training_report(plan: &train::CorpusPlan, args: &TrainArgs, options: &PrepareOptions) -> Report {
+#[derive(Debug, Clone)]
+struct TrainOptions {
+    paths: Vec<PathBuf>,
+    model_prefix: PathBuf,
+    lines: u64,
+    alpha: f64,
+    seed: u64,
+    vocab_size: u32,
+    character_coverage: f64,
+    max_sentence_length: usize,
+    max_sentencepiece_length: usize,
+    shuffle_buffer_lines: usize,
+    memory_budget_gb: u64,
+    training_temp_dir: Option<PathBuf>,
+    keep_training_file: bool,
+    balance_math: bool,
+    math_max_share: f64,
+    spm_threads: Option<usize>,
+    trainer_backend: TrainerBackend,
+    spm_train: PathBuf,
+    decide: Vec<String>,
+    drop_invalid: bool,
+    drop_long_lines: bool,
+    user_defined_symbol: Vec<String>,
+    user_defined_symbols_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrainConfig {
+    paths: Vec<PathBuf>,
+    model_prefix: PathBuf,
+    lines: u64,
+    alpha: f64,
+    seed: u64,
+    vocab_size: u32,
+    character_coverage: f64,
+    max_sentence_length: usize,
+    max_sentencepiece_length: usize,
+    shuffle_buffer_lines: usize,
+    memory_budget_gb: u64,
+    #[serde(deserialize_with = "required_option")]
+    training_temp_dir: Option<PathBuf>,
+    keep_training_file: bool,
+    balance_math: bool,
+    math_max_share: f64,
+    #[serde(deserialize_with = "required_option")]
+    spm_threads: Option<usize>,
+    trainer_backend: TrainerBackend,
+    spm_train: PathBuf,
+    decide: Vec<String>,
+    drop_invalid: bool,
+    drop_long_lines: bool,
+    user_defined_symbols: Vec<String>,
+    #[serde(deserialize_with = "required_option")]
+    user_defined_symbols_file: Option<PathBuf>,
+}
+
+impl TrainArgs {
+    fn resolve(&self, paths: &[PathBuf]) -> Result<TrainOptions> {
+        if let Some(config) = &self.config {
+            if !paths.is_empty() {
+                bail!("--config reads paths from JSON; remove positional training paths");
+            }
+            return TrainConfig::read(config)?.into_options();
+        }
+
+        let Some(model_prefix) = &self.model_prefix else {
+            bail!("spm-ocr train requires --model-prefix, or --config to read one from JSON");
+        };
+        if paths.is_empty() {
+            bail!("spm-ocr train requires at least one path, or --config to read paths from JSON");
+        }
+
+        Ok(TrainOptions {
+            paths: paths.to_vec(),
+            model_prefix: model_prefix.clone(),
+            lines: self.lines,
+            alpha: self.alpha,
+            seed: self.seed,
+            vocab_size: self.vocab_size,
+            character_coverage: self.character_coverage,
+            max_sentence_length: self.max_sentence_length,
+            max_sentencepiece_length: self.max_sentencepiece_length,
+            shuffle_buffer_lines: self.shuffle_buffer_lines,
+            memory_budget_gb: self.memory_budget_gb,
+            training_temp_dir: self.training_temp_dir.clone(),
+            keep_training_file: self.keep_training_file,
+            balance_math: self.balance_math,
+            math_max_share: self.math_max_share,
+            spm_threads: self.spm_threads,
+            trainer_backend: self.trainer_backend,
+            spm_train: self.spm_train.clone(),
+            decide: self.decide.clone(),
+            drop_invalid: self.drop_invalid,
+            drop_long_lines: self.drop_long_lines,
+            user_defined_symbol: self.user_defined_symbol.clone(),
+            user_defined_symbols_file: self.user_defined_symbols_file.clone(),
+        })
+    }
+}
+
+impl TrainConfig {
+    fn read(path: &Path) -> Result<Self> {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    fn into_options(self) -> Result<TrainOptions> {
+        if self.paths.is_empty() {
+            bail!("train config must include at least one path");
+        }
+
+        Ok(TrainOptions {
+            paths: self.paths,
+            model_prefix: self.model_prefix,
+            lines: self.lines,
+            alpha: self.alpha,
+            seed: self.seed,
+            vocab_size: self.vocab_size,
+            character_coverage: self.character_coverage,
+            max_sentence_length: self.max_sentence_length,
+            max_sentencepiece_length: self.max_sentencepiece_length,
+            shuffle_buffer_lines: self.shuffle_buffer_lines,
+            memory_budget_gb: self.memory_budget_gb,
+            training_temp_dir: self.training_temp_dir,
+            keep_training_file: self.keep_training_file,
+            balance_math: self.balance_math,
+            math_max_share: self.math_max_share,
+            spm_threads: self.spm_threads,
+            trainer_backend: self.trainer_backend,
+            spm_train: self.spm_train,
+            decide: self.decide,
+            drop_invalid: self.drop_invalid,
+            drop_long_lines: self.drop_long_lines,
+            user_defined_symbol: self.user_defined_symbols,
+            user_defined_symbols_file: self.user_defined_symbols_file,
+        })
+    }
+}
+
+fn required_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+fn training_report(
+    plan: &train::CorpusPlan,
+    args: &TrainOptions,
+    options: &PrepareOptions,
+) -> Report {
     let quota_evidence = plan.bucket_quotas.iter().map(|(bucket, quota)| {
         let available = plan.bucket_counts.get(bucket).copied().unwrap_or(0);
         format!(
@@ -625,7 +809,7 @@ fn training_report(plan: &train::CorpusPlan, args: &TrainArgs, options: &Prepare
     ])
 }
 
-fn training_file_policy(args: &TrainArgs) -> &'static str {
+fn training_file_policy(args: &TrainOptions) -> &'static str {
     if args.keep_training_file {
         "kept after training"
     } else {
@@ -633,7 +817,7 @@ fn training_file_policy(args: &TrainArgs) -> &'static str {
     }
 }
 
-fn math_policy_summary(args: &TrainArgs) -> String {
+fn math_policy_summary(args: &TrainOptions) -> String {
     if args.balance_math {
         format!(
             "balanced with max share {:.1}%",
@@ -644,7 +828,7 @@ fn math_policy_summary(args: &TrainArgs) -> String {
     }
 }
 
-fn unresolved_preflight_failures(report: &Report, args: &TrainArgs) -> usize {
+fn unresolved_preflight_failures(report: &Report, args: &TrainOptions) -> usize {
     report
         .findings
         .iter()
@@ -653,7 +837,7 @@ fn unresolved_preflight_failures(report: &Report, args: &TrainArgs) -> usize {
         .count()
 }
 
-fn report_preflight_for_training(report: Report, args: &TrainArgs) -> Report {
+fn report_preflight_for_training(report: Report, args: &TrainOptions) -> Report {
     report
         .findings
         .into_iter()
@@ -676,7 +860,7 @@ fn handled_preflight_finding(finding: Finding) -> Finding {
     handled
 }
 
-fn training_handles_preflight_failure(finding: &Finding, args: &TrainArgs) -> bool {
+fn training_handles_preflight_failure(finding: &Finding, args: &TrainOptions) -> bool {
     if finding.check == "invalid_utf8" {
         return args.drop_invalid;
     }
@@ -686,7 +870,7 @@ fn training_handles_preflight_failure(finding: &Finding, args: &TrainArgs) -> bo
     axis_handled_by_training(&finding.check, args)
 }
 
-fn axis_handled_by_training(check: &str, args: &TrainArgs) -> bool {
+fn axis_handled_by_training(check: &str, args: &TrainOptions) -> bool {
     let Some(axis_name) = check
         .strip_prefix("axis[")
         .and_then(|rest| rest.strip_suffix(']'))
@@ -704,7 +888,7 @@ fn axis_handled_by_training(check: &str, args: &TrainArgs) -> bool {
     })
 }
 
-fn prepare_options(args: &TrainArgs) -> Result<PrepareOptions> {
+fn prepare_options(args: &TrainOptions) -> Result<PrepareOptions> {
     let gib = 1024_u64 * 1024 * 1024;
     let options = PrepareOptions {
         target_lines: args.lines,
@@ -721,7 +905,7 @@ fn prepare_options(args: &TrainArgs) -> Result<PrepareOptions> {
     Ok(options)
 }
 
-fn math_policy(args: &TrainArgs) -> train::MathPolicy {
+fn math_policy(args: &TrainOptions) -> train::MathPolicy {
     if args.balance_math {
         train::MathPolicy::Balanced {
             max_share: args.math_max_share,
@@ -736,7 +920,7 @@ fn run_sentencepiece(
     plan: &train::CorpusPlan,
     canonicalizer: &Canonicalizer,
     options: &PrepareOptions,
-    args: &TrainArgs,
+    args: &TrainOptions,
     user_symbols: &[String],
     rust_jobs: Option<usize>,
 ) -> Result<()> {
@@ -768,7 +952,7 @@ fn run_sentencepiece(
     Ok(())
 }
 
-fn prepared_training_file(args: &TrainArgs) -> Result<tempfile::NamedTempFile> {
+fn prepared_training_file(args: &TrainOptions) -> Result<tempfile::NamedTempFile> {
     match &args.training_temp_dir {
         Some(directory) => tempfile::NamedTempFile::new_in(directory)
             .with_context(|| format!("creating temporary file in {}", directory.display())),
@@ -777,7 +961,7 @@ fn prepared_training_file(args: &TrainArgs) -> Result<tempfile::NamedTempFile> {
 }
 
 fn trainer_command(
-    args: &TrainArgs,
+    args: &TrainOptions,
     settings: &SentencePieceSettings,
 ) -> Result<std::process::Command> {
     let mut command = match args.trainer_backend {
@@ -832,7 +1016,7 @@ struct SentencePieceSettings {
 
 fn trainer_settings(
     input: &Path,
-    args: &TrainArgs,
+    args: &TrainOptions,
     options: &PrepareOptions,
     user_symbols: &[String],
     rust_jobs: Option<usize>,
@@ -919,7 +1103,7 @@ fn settings_json(settings: &SentencePieceSettings) -> Result<String> {
     serde_json::to_string(&value).context("serializing SentencePiece trainer settings")
 }
 
-fn trainer_summary(args: &TrainArgs, settings: &SentencePieceSettings) -> String {
+fn trainer_summary(args: &TrainOptions, settings: &SentencePieceSettings) -> String {
     match args.trainer_backend {
         TrainerBackend::UvPython => format!(
             "uv run python SentencePieceTrainer.train with {}",
@@ -935,7 +1119,7 @@ fn trainer_summary(args: &TrainArgs, settings: &SentencePieceSettings) -> String
     }
 }
 
-fn user_defined_symbols(args: &TrainArgs) -> Result<Vec<String>> {
+fn user_defined_symbols(args: &TrainOptions) -> Result<Vec<String>> {
     let mut symbols = args.user_defined_symbol.clone();
     if let Some(path) = &args.user_defined_symbols_file {
         let text =
@@ -1046,4 +1230,92 @@ fn emit(report: &Report, output: &OutputArgs) {
         render::as_text(report)
     };
     println!("{rendered}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_train_config_loads() {
+        let config: TrainConfig =
+            serde_json::from_str(include_str!("../cfg.json.example")).expect("valid config");
+        let options = config.into_options().expect("valid options");
+
+        assert_eq!(options.paths, vec![PathBuf::from("corpus/")]);
+        assert_eq!(options.model_prefix, PathBuf::from("ocr_tokenizer"));
+        assert_eq!(options.vocab_size, 40_000);
+    }
+
+    #[test]
+    fn train_config_rejects_unknown_keys() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../cfg.json.example")).expect("valid json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .insert("vocab_szie".to_string(), json!(40_000));
+
+        let error = serde_json::from_value::<TrainConfig>(value)
+            .expect_err("unknown keys must fail")
+            .to_string();
+        assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn train_config_rejects_missing_nullable_keys() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../cfg.json.example")).expect("valid json");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("user_defined_symbols_file");
+
+        let error = serde_json::from_value::<TrainConfig>(value)
+            .expect_err("missing keys must fail")
+            .to_string();
+        assert!(error.contains("missing field `user_defined_symbols_file`"));
+    }
+
+    #[test]
+    fn config_conflicts_with_train_flags() {
+        let parsed =
+            Cli::try_parse_from(["spm-ocr", "train", "--config", "cfg.json", "--lines", "1"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn config_rejects_positional_paths() {
+        let cli = Cli::try_parse_from(["spm-ocr", "train", "corpus/", "--config", "cfg.json"])
+            .expect("parse");
+        let Command::Train { paths, args, .. } = cli.command else {
+            panic!("expected train command");
+        };
+
+        let error = args
+            .resolve(&paths)
+            .expect_err("config owns the training paths")
+            .to_string();
+        assert!(error.contains("remove positional training paths"));
+    }
+
+    #[test]
+    fn vocab_size_alias_is_not_dropped() {
+        let cli = Cli::try_parse_from([
+            "spm-ocr",
+            "train",
+            "corpus/",
+            "--model-prefix",
+            "ocr_tokenizer",
+            "--vocab_size",
+            "1000",
+        ])
+        .expect("parse");
+        let Command::Train { paths, args, .. } = cli.command else {
+            panic!("expected train command");
+        };
+
+        let options = args.resolve(&paths).expect("valid cli options");
+        assert_eq!(options.vocab_size, 1000);
+    }
 }

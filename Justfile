@@ -64,10 +64,16 @@ canon SOURCE OUT *FLAGS:
 canon-in-place +PATHS:
     {{ spm }} canonicalize {{ PATHS }} --in-place
 
-# Step 3 — prepare a balanced corpus sample and train SentencePiece
+# Step 3 — prepare a balanced corpus sample and train SentencePiece from JSON config
 [group('workflow')]
 [no-exit-message]
-train SOURCE MODEL_PREFIX *FLAGS:
+train CONFIG *FLAGS:
+    {{ spm }} train --config {{ CONFIG }} {{ FLAGS }}
+
+# Step 3, spelling every training option on the command line
+[group('workflow')]
+[no-exit-message]
+train-args SOURCE MODEL_PREFIX *FLAGS:
     {{ spm }} train {{ SOURCE }} --model-prefix {{ MODEL_PREFIX }} {{ FLAGS }}
 
 # Step 4 — run the artifact checks against a trained .model
