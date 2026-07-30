@@ -46,34 +46,184 @@ If you read nothing else:
 
 ## Quick reference
 
-```python
-import sentencepiece as spm
-
-spm.SentencePieceTrainer.train(
-    input='balanced_corpus.txt',
-    model_prefix='ocr_tokenizer',
-    model_type='bpe',
-    vocab_size=40000,
-    character_coverage=0.9998,
-    byte_fallback=True,
-    normalization_rule_name='identity',
-    add_dummy_prefix=False,
-    remove_extra_whitespaces=False,
-    split_by_unicode_script=True,
-    split_by_whitespace=True,
-    split_digits=True,
-    max_sentencepiece_length=8,
-    max_sentence_length=16384,
-    input_sentence_size=20000000,
-    shuffle_input_sentence=True,
-    train_extremely_large_corpus=True,
-    user_defined_symbols=[...],  # curate from real LaTeX command frequencies
-    num_threads=16,
-)
+```bash
+spm-ocr train corpus/ \
+  --model-prefix ocr_tokenizer \
+  --lines 20000000 \
+  --alpha 0.3 \
+  --memory-budget-gb 32 \
+  --training-temp-dir /path/to/scratch \
+  --keep-training-file \
+  --user-defined-symbols-file latex-symbols.txt
 ```
 
-Every parameter is justified in [configuration](docs/03-configuration.md). Don't copy this
-without reading that page — several defaults are wrong for OCR in ways that produce no error.
+The command scans the corpus first, memory-maps source files, applies the same canonicalization
+rules the guide validates, balances writing systems with α-smoothing, writes a bounded prepared
+training sample, then invokes the official SentencePiece trainer. Math-like lines are detected
+and reported, but they are not given a separate balancing bucket by default; broad OCR corpora
+usually should not let a small amount of LaTeX distort the text tokenizer. Use `--balance-math`
+with `--math-max-share` for math-heavy deployments.
+
+The default trainer backend is `uv run python` with the project `sentencepiece` dependency; an
+external binary is available with `--trainer-backend spm-train --spm-train /path/to/spm_train`.
+
+The prepared training sample is a real temporary file, not a FIFO. SentencePiece reads its input
+more than once, so a named pipe can hang. Pass `--keep-training-file` to retain the exact file
+used for training; otherwise it is deleted after the trainer exits. Put it on a disk with enough
+space via `--training-temp-dir`.
+
+The underlying SentencePiece parameters are the guide's OCR-safe defaults: BPE,
+`byte_fallback=true`, `normalization_rule_name=identity`, no dummy prefix, whitespace
+preserved, Unicode-script splitting, digit splitting, `max_sentencepiece_length=8`,
+`max_sentence_length=16384`, `train_extremely_large_corpus=true`. Every parameter is justified
+in [configuration](docs/03-configuration.md). Don't copy this without reading that page —
+several defaults are wrong for OCR in ways that produce no error.
+
+## Why not just run SentencePiece directly?
+
+The model trainer is still official SentencePiece. The difference is everything upstream and
+around it — the places where the silent failures in [failure modes](docs/09-failure-modes.md)
+enter:
+
+- **Corpus mmap and bounded preparation.** Source files are mapped and streamed, so a 50GB
+  corpus does not become a 50GB heap allocation.
+- **Measured canonicalization.** NFC and the guide's safe collapse axes are applied before
+  training, while OCR-visible compatibility distinctions are preserved.
+- **α-smoothed corpus assembly.** SentencePiece's own `input_sentence_size` is unaware of
+  language, script or domain; this tool balances the prepared sample before the trainer sees it.
+- **Math visibility without accidental math dominance.** Math-like lines are counted and
+  reported by default, with explicit capped balancing when the deployment really is math-heavy.
+- **Preflight and post-train report.** The command refuses to spend trainer compute on
+  unresolved corpus defects, then checks the trained `.model` for the settings and vocabulary
+  failure modes the guide names.
+- **Reproducible training input.** `--keep-training-file` preserves the exact prepared text used
+  to train the tokenizer.
+
+Running raw SentencePiece with the same flags only covers the trainer settings. It does not fix
+mixed encodings, does not balance the input, does not tell you what it skipped, and does not
+validate the artifact afterwards.
+
+## Examples
+
+### Pilot: check the shape before spending compute
+
+```bash
+spm-ocr train corpus/ \
+  --model-prefix pilots/ocr_pilot \
+  --lines 2000000 \
+  --alpha 0.5 \
+  --training-temp-dir scratch/ \
+  --keep-training-file
+```
+
+This is the run to do first. It scans the corpus, reports raw defects, prepares a 2M-line
+training sample, keeps that exact sample on disk, trains a tokenizer, and then checks the
+resulting `.model`. `--alpha 0.5` is moderate script balancing: enough to lift tails, not as
+aggressive as the guide's strong `0.3` default from multilingual LM work.
+
+Read the `training_buckets` finding before trusting the tokenizer. It tells you how many lines
+were eligible in each script bucket and how many were selected.
+
+### Broad OCR tokenizer: script-balanced text
+
+```bash
+spm-ocr train corpus/ \
+  --model-prefix ocr_tokenizer \
+  --vocab-size 40000 \
+  --lines 20000000 \
+  --alpha 0.5 \
+  --training-temp-dir scratch/ \
+  --keep-training-file \
+  --spm-threads 16 \
+  --jobs 16
+```
+
+This is the default production-shaped command for mostly-text OCR. Buckets are dominant writing
+systems such as Latin, Cyrillic, Arabic, Han, Devanagari and Thai. Math-like lines are counted
+and reported, but they do not get their own quota bucket, so a small amount of LaTeX cannot
+accidentally dominate the tokenizer.
+
+The Rust side stays memory-bounded: source files are memory-mapped, accepted lines flow through
+a bounded shuffle buffer, and the selected sample is written to `scratch/` for SentencePiece to
+read. SentencePiece is still a batch trainer, so `--lines` and scratch disk capacity matter.
+
+### Stronger tail-script boost
+
+```bash
+spm-ocr train corpus/ \
+  --model-prefix ocr_tokenizer_tail \
+  --lines 20000000 \
+  --alpha 0.3 \
+  --training-temp-dir scratch/ \
+  --keep-training-file
+```
+
+Lower alpha means stronger balancing. Use this if pilot reports show low-resource scripts are
+still underrepresented. It will make rare scripts much more visible to BPE merge learning, but
+it can also move the tokenizer further from your deployment distribution, so inspect the kept
+training file and post-train `script_coverage`.
+
+### Math-heavy deployment
+
+```bash
+spm-ocr train corpus/ \
+  --model-prefix ocr_tokenizer_math \
+  --lines 20000000 \
+  --alpha 0.5 \
+  --balance-math \
+  --math-max-share 0.10 \
+  --user-defined-symbols-file latex-symbols.txt \
+  --training-temp-dir scratch/ \
+  --keep-training-file
+```
+
+This gives math-like lines their own balancing bucket, capped at 10% of the selected sample.
+Use it for exams, papers, formula-heavy pages or math OCR. Keep the cap unless the deployment is
+truly math-dominant; otherwise text scripts lose too much budget.
+
+`latex-symbols.txt` should be curated from your corpus. Each line is one protected symbol or
+command, for example:
+
+```text
+\frac
+\sqrt
+\sum
+\operatorname
+^
+_
+{
+}
+```
+
+### External SentencePiece binary
+
+```bash
+spm-ocr train corpus/ \
+  --model-prefix ocr_tokenizer \
+  --trainer-backend spm-train \
+  --spm-train /opt/homebrew/bin/spm_train \
+  --training-temp-dir scratch/
+```
+
+The default backend uses `uv run python` and the project `sentencepiece` dependency. This
+variant uses an installed `spm_train` executable instead. The corpus preparation and validation
+are identical; only the final trainer invocation changes.
+
+### Lossy data triage
+
+```bash
+spm-ocr train corpus/ \
+  --model-prefix ocr_tokenizer_triage \
+  --drop-invalid \
+  --drop-long-lines \
+  --training-temp-dir scratch/ \
+  --keep-training-file
+```
+
+This is for triage, not a clean production tokenizer. Invalid UTF-8 and over-length lines are
+data loss. The defaults refuse them because bad bytes and very long lines usually identify an
+extractor problem or exactly the hard examples you wanted to train on. Use these flags only when
+you have decided losing those lines is better than blocking the run.
 
 ## The two checklists
 
@@ -85,9 +235,12 @@ a training run:
 just workflow                              # the whole flow, with runnable examples
 just scan       corpus/                    # 1. measure
 just canon      corpus/ canonical/         # 2. fix, then verify
-                                           # 3. train your tokenizer on canonical/
-just check-model ocr.model                 # 4. after training
-just check-all   ocr.model canonical/      # both checklists, corpus findings first
+spm-ocr train   canonical/ --model-prefix ocr_tokenizer \
+                 --training-temp-dir scratch/ --keep-training-file
+                                           # 3. train with mmap prep + balanced sample
+just check-model ocr_tokenizer.model       # 4. after training
+just check-all   ocr_tokenizer.model canonical/
+                                           # both checklists, corpus findings first
 just options                               # every flag for every subcommand
 ```
 
@@ -99,10 +252,17 @@ Directories are walked recursively. Binary files are skipped by content, not ext
 trained `.model` sitting beside your corpus is the usual reason that matters — and what was
 skipped is always reported.
 
-The corpus scan is **parallel by default**, across sources and within each one: a file above a
+The corpus scan and train preparation are **parallel by default**, across sources and within
+each one: a file above a
 megabyte is split into line-aligned chunks, so a single large file parallelizes as well as many
 shards. Files are memory-mapped rather than read, which is what lets a corpus larger than RAM be
 scanned at all. `--jobs` overrides the default, and the report is byte-identical at any setting.
+
+`train` is bounded on the Rust side: it does not keep the corpus or the selected sample in RAM.
+It uses a first pass for counts, computes α-smoothed bucket quotas, then streams accepted
+canonicalized lines through a bounded shuffle buffer into the prepared training file.
+SentencePiece itself is still a batch trainer, so the training sample size and temp-disk
+location matter.
 
 Findings are ranked worst-first and carry both a severity and a remedy:
 
@@ -161,7 +321,8 @@ to you.
 
 ## Repo layout
 
-A Rust project (`cargo` + `just`), with no runtime dependencies beyond the binary itself.
+A Rust project (`cargo` + `just`) plus a minimal `uv` Python project for the default
+SentencePiece trainer backend.
 
 ```
 just          # list recipes, grouped into [workflow] and [dev]
@@ -170,6 +331,10 @@ just build    # the release binary
 just runtime  # toolchain, and the parallelism the scan defaults to
 just hooks    # install the pre-commit hook
 ```
+
+Validation-only commands use the Rust binary. Training with the default backend also needs
+`uv sync` so `sentencepiece` is available to `uv run python`; alternatively install
+`spm_train` yourself and pass `--trainer-backend spm-train`.
 
 The checks live alongside the guide they encode: [`src/corpus/`](src/corpus/) scans and
 canonicalizes, [`src/model/`](src/model/) reads the artifact, and both produce the same

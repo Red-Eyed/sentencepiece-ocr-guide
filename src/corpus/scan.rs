@@ -260,7 +260,7 @@ fn count_block(block: &[u8], config: &Config) -> Counts {
 ///
 /// Returned as ranges rather than slices so the caller keeps ownership of the mapping and the
 /// split can be computed without touching the bytes it describes.
-fn line_aligned_chunks(data: &[u8]) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn line_aligned_chunks(data: &[u8]) -> Vec<std::ops::Range<usize>> {
     let mut chunks = Vec::new();
     let mut start = 0;
 

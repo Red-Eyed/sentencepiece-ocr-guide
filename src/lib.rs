@@ -14,4 +14,5 @@ pub mod format;
 pub mod model;
 pub mod render;
 pub mod report;
+pub mod train;
 pub mod writing;

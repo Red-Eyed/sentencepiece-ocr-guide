@@ -21,14 +21,18 @@ workflow:
     @echo ""
     @echo "  1. just scan corpus/                       which encoding axes vary, per source"
     @echo "  2. just canon corpus/ canonical/           rewrite to canonical form, then verify"
-    @echo "  3.    <train your tokenizer on canonical/>"
-    @echo "  4. just check-model ocr.model              the artifact checks"
-    @echo "     just check-all ocr.model canonical/     both checklists, corpus findings first"
+    @echo "  3. spm-ocr train canonical/ \\"
+    @echo "       --model-prefix ocr_tokenizer \\"
+    @echo "       --training-temp-dir scratch/ --keep-training-file"
+    @echo "  4. just check-model ocr_tokenizer.model    the artifact checks"
+    @echo "     just check-all ocr_tokenizer.model canonical/"
+    @echo "                                             both checklists, corpus findings first"
     @echo ""
     @echo "Findings are ranked worst-first and each carries a remedy. A 'fix_corpus'"
     @echo "finding must be acted on before any retrain: retraining alone reproduces it."
     @echo "A SKIP is never a PASS, and a PRESERVE axis with a non-zero count is not a"
     @echo "defect — it is confirmation that script is present in your data."
+    @echo "Math-like lines are reported by default; use --balance-math for math-heavy runs."
     @echo ""
     @echo "The model checks read the .model file itself — its pieces and the trainer"
     @echo "settings recorded in it — so they need no samples and no tokenizer runtime."
@@ -39,6 +43,7 @@ workflow:
     @echo "  just scan corpus/ --jobs 2 --json"
     @echo "  just canon corpus/ out/ --decide soft_hyphen_line_final"
     @echo "  just check-model ocr.model --allow-digit-letter-pieces"
+    @echo "  spm-ocr train corpus/ --lines 20000000 --json"
     @echo ""
     @echo "Full option list: just options"
 
@@ -76,7 +81,7 @@ check-all MODEL CORPUS *FLAGS:
 [group('workflow')]
 options:
     @{{ spm }} --help
-    @for cmd in corpus canonicalize model all; do \
+    @for cmd in corpus canonicalize model all train; do \
         echo ""; echo "=== spm-ocr $cmd ==="; {{ spm }} $cmd --help; \
     done
 

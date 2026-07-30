@@ -1,0 +1,16 @@
+[project]
+name = "spm-ocr"
+version = "0.2.0"
+description = "Validate and train a SentencePiece tokenizer for multilingual OCR"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Vadym Stupakov", email = "vadim.stupakov@gmail.com" },
+]
+dependencies = [
+    "sentencepiece>=0.2.2",
+]
+
+[tool.uv]
+package = false
