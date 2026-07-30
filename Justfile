@@ -21,8 +21,7 @@ workflow:
     @echo ""
     @echo "  1. just scan corpus/                       which encoding axes vary, per source"
     @echo "  2. just canon corpus/ canonical/           rewrite to canonical form, then verify"
-    @echo "  3. spm-ocr train canonical/ \\"
-    @echo "       --model-prefix ocr_tokenizer \\"
+    @echo "  3. just train canonical/ ocr_tokenizer \\"
     @echo "       --training-temp-dir scratch/ --keep-training-file"
     @echo "  4. just check-model ocr_tokenizer.model    the artifact checks"
     @echo "     just check-all ocr_tokenizer.model canonical/"
@@ -43,7 +42,7 @@ workflow:
     @echo "  just scan corpus/ --jobs 2 --json"
     @echo "  just canon corpus/ out/ --decide soft_hyphen_line_final"
     @echo "  just check-model ocr.model --allow-digit-letter-pieces"
-    @echo "  spm-ocr train corpus/ --lines 20000000 --json"
+    @echo "  just train corpus/ ocr_tokenizer --lines 20000000 --json"
     @echo ""
     @echo "Full option list: just options"
 
@@ -64,6 +63,12 @@ canon SOURCE OUT *FLAGS:
 [no-exit-message]
 canon-in-place +PATHS:
     {{ spm }} canonicalize {{ PATHS }} --in-place
+
+# Step 3 — prepare a balanced corpus sample and train SentencePiece
+[group('workflow')]
+[no-exit-message]
+train SOURCE MODEL_PREFIX *FLAGS:
+    {{ spm }} train {{ SOURCE }} --model-prefix {{ MODEL_PREFIX }} {{ FLAGS }}
 
 # Step 4 — run the artifact checks against a trained .model
 [group('workflow')]

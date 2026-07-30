@@ -1,6 +1,6 @@
 [project]
 name = "spm-ocr"
-version = "0.2.0"
+version = "0.2.1"
 description = "Validate and train a SentencePiece tokenizer for multilingual OCR"
 readme = "README.md"
 requires-python = ">=3.11"
