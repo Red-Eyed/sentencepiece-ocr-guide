@@ -1,9 +1,8 @@
 set dotenv-load := false
 
 # The tool, built on demand. `cargo run` rebuilds only when something changed, so no recipe
-# needs a "build first" note — and cargo's own output goes to stderr, leaving stdout clean
-# for `--json`.
-spm := "cargo run --release --quiet --"
+# needs a "build first" note.
+spm := "cargo run --release --"
 
 # List available recipes, grouped
 default:
