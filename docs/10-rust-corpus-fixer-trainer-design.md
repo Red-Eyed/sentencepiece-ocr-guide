@@ -111,7 +111,9 @@ The normal user config should be small:
 }
 ```
 
-The bundled `cfg.json.ocr` file defines named presets:
+The bundled `cfg.json.ocr` file defines named presets. Each shipped preset contains every
+canonicalization, balancing, SentencePiece, and validation parameter directly so users can switch
+behavior by changing only `cfg.json.preset`:
 
 ```json
 {
@@ -120,29 +122,64 @@ The bundled `cfg.json.ocr` file defines named presets:
   "presets": {
     "ocr_multilingual": {
       "description": "General multilingual OCR tokenizer preset.",
-      "canonicalization": {},
-      "balancing": {},
-      "sentencepiece": {},
-      "validation": {}
+      "canonicalization": {
+        "unicode_form": "nfc"
+      },
+      "balancing": {
+        "enabled": true
+      },
+      "sentencepiece": {
+        "trainer": "python_sentencepiece",
+        "model_type": "bpe",
+        "vocab_size": 40000
+      },
+      "validation": {
+        "mode": "report"
+      }
     },
     "ocr_cjk_heavy": {
-      "extends": "ocr_multilingual",
+      "description": "CJK-heavy OCR preset.",
+      "canonicalization": {
+        "unicode_form": "nfc"
+      },
+      "balancing": {
+        "enabled": true
+      },
       "sentencepiece": {
+        "trainer": "python_sentencepiece",
+        "model_type": "bpe",
         "vocab_size": 48000,
         "character_coverage": 0.99995,
         "max_sentencepiece_length": 4
+      },
+      "validation": {
+        "mode": "report"
       }
     },
     "ocr_math_heavy": {
-      "extends": "ocr_multilingual",
+      "description": "Math/LaTeX-heavy OCR preset.",
+      "canonicalization": {
+        "unicode_form": "nfc"
+      },
+      "balancing": {
+        "enabled": true
+      },
       "sentencepiece": {
+        "trainer": "python_sentencepiece",
+        "model_type": "bpe",
         "vocab_size": 48000,
         "max_sentence_length": 32768
+      },
+      "validation": {
+        "mode": "report"
       }
     }
   }
 }
 ```
+
+The example above is abbreviated for readability; the checked-in `cfg.json.ocr` stores the full
+field set for every preset.
 
 After preset expansion, the effective config contains the full policy:
 

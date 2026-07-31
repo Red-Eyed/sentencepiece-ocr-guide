@@ -89,19 +89,134 @@
     },
     "ocr_cjk_heavy": {
       "description": "CJK-heavy OCR preset. Keeps coverage higher and learned pieces shorter for better character-level locality.",
-      "extends": "ocr_multilingual",
+      "canonicalization": {
+        "unicode_form": "nfc",
+        "strip": ["bom", "zero_width_space"],
+        "map_nbsp_to_space": true,
+        "fold_arabic_presentation_forms": true,
+        "soft_hyphen": "line_final_to_hyphen_midline_strip",
+        "preserve_zwj_zwnj": true,
+        "preserve_compatibility_chars": true
+      },
+      "balancing": {
+        "enabled": true,
+        "mode": "conservative",
+        "total_lines": 20000000,
+        "alpha": 0.7,
+        "hierarchy": ["domain", "script", "language_hint", "source_group", "length_bin"],
+        "min_keep_fraction": 0.5,
+        "max_downsample_ratio": 4.0,
+        "collapse_buckets_below_lines": 1000,
+        "max_part_lines": 1000000,
+        "shuffle_seed": 1337
+      },
       "sentencepiece": {
+        "trainer": "python_sentencepiece",
+        "python": {
+          "runner": "uv",
+          "args": ["run", "python"],
+          "module": "spm_ocr_train_bridge"
+        },
+        "model_type": "bpe",
         "vocab_size": 48000,
         "character_coverage": 0.99995,
-        "max_sentencepiece_length": 4
+        "byte_fallback": true,
+        "normalization_rule_name": "identity",
+        "add_dummy_prefix": false,
+        "remove_extra_whitespaces": false,
+        "split_by_unicode_script": true,
+        "split_by_whitespace": true,
+        "split_digits": true,
+        "max_sentencepiece_length": 4,
+        "max_sentence_length": 16384,
+        "input_sentence_size": 20000000,
+        "shuffle_input_sentence": true,
+        "train_extremely_large_corpus": true,
+        "user_defined_symbols": [
+          "\\frac",
+          "\\sqrt",
+          "\\sum",
+          "\\int",
+          "\\prod",
+          "\\lim",
+          "\\alpha",
+          "\\beta",
+          "\\gamma",
+          "\\theta",
+          "\\pi",
+          "\\sigma",
+          "\\times",
+          "\\cdot",
+          "\\leq",
+          "\\geq",
+          "\\neq",
+          "\\approx",
+          "\\left",
+          "\\right",
+          "\\begin",
+          "\\end",
+          "\\mathbf",
+          "\\mathrm",
+          "^",
+          "_",
+          "{",
+          "}"
+        ],
+        "num_threads": 16
+      },
+      "validation": {
+        "mode": "report",
+        "line_policy": "fix_or_skip",
+        "issue_log": "reports/corpus_issues.jsonl",
+        "include_line_text_in_log": false,
+        "round_trip_sample_per_bucket": 1000
       }
     },
     "ocr_math_heavy": {
       "description": "Math/LaTeX-heavy OCR preset. Keeps longer lines and protects a broader set of common LaTeX commands.",
-      "extends": "ocr_multilingual",
+      "canonicalization": {
+        "unicode_form": "nfc",
+        "strip": ["bom", "zero_width_space"],
+        "map_nbsp_to_space": true,
+        "fold_arabic_presentation_forms": true,
+        "soft_hyphen": "line_final_to_hyphen_midline_strip",
+        "preserve_zwj_zwnj": true,
+        "preserve_compatibility_chars": true
+      },
+      "balancing": {
+        "enabled": true,
+        "mode": "conservative",
+        "total_lines": 20000000,
+        "alpha": 0.7,
+        "hierarchy": ["domain", "script", "language_hint", "source_group", "length_bin"],
+        "min_keep_fraction": 0.5,
+        "max_downsample_ratio": 4.0,
+        "collapse_buckets_below_lines": 1000,
+        "max_part_lines": 1000000,
+        "shuffle_seed": 1337
+      },
       "sentencepiece": {
+        "trainer": "python_sentencepiece",
+        "python": {
+          "runner": "uv",
+          "args": ["run", "python"],
+          "module": "spm_ocr_train_bridge"
+        },
+        "model_type": "bpe",
         "vocab_size": 48000,
+        "character_coverage": 0.9998,
+        "byte_fallback": true,
+        "normalization_rule_name": "identity",
+        "add_dummy_prefix": false,
+        "remove_extra_whitespaces": false,
+        "split_by_unicode_script": true,
+        "split_by_whitespace": true,
+        "split_digits": true,
+        "max_sentencepiece_length": 8,
         "max_sentence_length": 32768,
+        "input_sentence_size": 20000000,
+        "shuffle_input_sentence": true,
+        "train_extremely_large_corpus": true,
         "user_defined_symbols": [
           "\\frac",
           "\\sqrt",
@@ -146,7 +261,15 @@
           "_",
           "{",
           "}"
-        ]
+        ],
+        "num_threads": 16
+      },
+      "validation": {
+        "mode": "report",
+        "line_policy": "fix_or_skip",
+        "issue_log": "reports/corpus_issues.jsonl",
+        "include_line_text_in_log": false,
+        "round_trip_sample_per_bucket": 1000
       }
     }
   }

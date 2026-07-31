@@ -43,6 +43,21 @@ Minimal `cfg.json`:
 }
 ```
 
+To use a specialized preset, change only the preset name:
+
+```json
+{
+  "preset": "ocr_cjk_heavy",
+  "corpus": {
+    "path": "data/raw-corpus"
+  },
+  "output": {
+    "work_dir": "runs/ocr-spm-v1",
+    "model_prefix": "ocr_tokenizer"
+  }
+}
+```
+
 Run:
 
 ```sh

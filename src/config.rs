@@ -763,4 +763,134 @@ mod tests {
         assert_eq!(effective.output.model_prefix, "ocr_tokenizer");
         assert!(effective.sentencepiece.byte_fallback);
     }
+
+    #[test]
+    fn shipped_presets_are_standalone_and_complete() {
+        for (name, preset) in catalog().presets {
+            assert!(
+                preset.extends.is_none(),
+                "shipped preset `{name}` should not require inheritance"
+            );
+            assert_complete_canonicalization(name.as_str(), &preset.canonicalization);
+            assert_complete_balancing(name.as_str(), &preset.balancing);
+            assert_complete_sentencepiece(name.as_str(), &preset.sentencepiece);
+            assert_complete_validation(name.as_str(), &preset.validation);
+        }
+    }
+
+    fn assert_complete_canonicalization(name: &str, config: &PartialCanonicalizationConfig) {
+        assert!(config.unicode_form.is_some(), "{name}: unicode_form");
+        assert!(config.strip.is_some(), "{name}: strip");
+        assert!(
+            config.map_nbsp_to_space.is_some(),
+            "{name}: map_nbsp_to_space"
+        );
+        assert!(
+            config.fold_arabic_presentation_forms.is_some(),
+            "{name}: fold_arabic_presentation_forms"
+        );
+        assert!(config.soft_hyphen.is_some(), "{name}: soft_hyphen");
+        assert!(
+            config.preserve_zwj_zwnj.is_some(),
+            "{name}: preserve_zwj_zwnj"
+        );
+        assert!(
+            config.preserve_compatibility_chars.is_some(),
+            "{name}: preserve_compatibility_chars"
+        );
+    }
+
+    fn assert_complete_balancing(name: &str, config: &PartialBalancingConfig) {
+        assert!(config.enabled.is_some(), "{name}: enabled");
+        assert!(config.mode.is_some(), "{name}: mode");
+        assert!(config.total_lines.is_some(), "{name}: total_lines");
+        assert!(config.alpha.is_some(), "{name}: alpha");
+        assert!(config.hierarchy.is_some(), "{name}: hierarchy");
+        assert!(
+            config.min_keep_fraction.is_some(),
+            "{name}: min_keep_fraction"
+        );
+        assert!(
+            config.max_downsample_ratio.is_some(),
+            "{name}: max_downsample_ratio"
+        );
+        assert!(
+            config.collapse_buckets_below_lines.is_some(),
+            "{name}: collapse_buckets_below_lines"
+        );
+        assert!(config.max_part_lines.is_some(), "{name}: max_part_lines");
+        assert!(config.shuffle_seed.is_some(), "{name}: shuffle_seed");
+    }
+
+    fn assert_complete_sentencepiece(name: &str, config: &PartialSentencePieceConfig) {
+        assert!(config.trainer.is_some(), "{name}: trainer");
+        assert!(config.python.is_some(), "{name}: python");
+        assert!(config.model_type.is_some(), "{name}: model_type");
+        assert!(config.vocab_size.is_some(), "{name}: vocab_size");
+        assert!(
+            config.character_coverage.is_some(),
+            "{name}: character_coverage"
+        );
+        assert!(config.byte_fallback.is_some(), "{name}: byte_fallback");
+        assert!(
+            config.normalization_rule_name.is_some(),
+            "{name}: normalization_rule_name"
+        );
+        assert!(
+            config.add_dummy_prefix.is_some(),
+            "{name}: add_dummy_prefix"
+        );
+        assert!(
+            config.remove_extra_whitespaces.is_some(),
+            "{name}: remove_extra_whitespaces"
+        );
+        assert!(
+            config.split_by_unicode_script.is_some(),
+            "{name}: split_by_unicode_script"
+        );
+        assert!(
+            config.split_by_whitespace.is_some(),
+            "{name}: split_by_whitespace"
+        );
+        assert!(config.split_digits.is_some(), "{name}: split_digits");
+        assert!(
+            config.max_sentencepiece_length.is_some(),
+            "{name}: max_sentencepiece_length"
+        );
+        assert!(
+            config.max_sentence_length.is_some(),
+            "{name}: max_sentence_length"
+        );
+        assert!(
+            config.input_sentence_size.is_some(),
+            "{name}: input_sentence_size"
+        );
+        assert!(
+            config.shuffle_input_sentence.is_some(),
+            "{name}: shuffle_input_sentence"
+        );
+        assert!(
+            config.train_extremely_large_corpus.is_some(),
+            "{name}: train_extremely_large_corpus"
+        );
+        assert!(
+            config.user_defined_symbols.is_some(),
+            "{name}: user_defined_symbols"
+        );
+        assert!(config.num_threads.is_some(), "{name}: num_threads");
+    }
+
+    fn assert_complete_validation(name: &str, config: &PartialValidationConfig) {
+        assert!(config.mode.is_some(), "{name}: mode");
+        assert!(config.line_policy.is_some(), "{name}: line_policy");
+        assert!(config.issue_log.is_some(), "{name}: issue_log");
+        assert!(
+            config.include_line_text_in_log.is_some(),
+            "{name}: include_line_text_in_log"
+        );
+        assert!(
+            config.round_trip_sample_per_bucket.is_some(),
+            "{name}: round_trip_sample_per_bucket"
+        );
+    }
 }
