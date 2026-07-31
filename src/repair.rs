@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use serde::Serialize;
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
@@ -11,9 +12,10 @@ use crate::balance::{classify_line, shard_file_name, BucketKey};
 use crate::config::EffectiveConfig;
 use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId, DiscoveredCorpus};
 use crate::normalize::canonicalize_line;
-use crate::progress::ProgressReporter;
+use crate::progress::{ProgressReporter, StageProgress};
 
 const FIXED_CORPUS_NAME: &str = "fixed_corpus.txt";
+const REPAIR_CHUNK_LINES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RepairSummary {
@@ -59,7 +61,7 @@ pub enum RepairError {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct CorpusIssue {
     id: IssueId,
     action: IssueAction,
@@ -71,7 +73,7 @@ struct CorpusIssue {
     line_text: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum IssueId {
     InvalidUtf8,
@@ -85,7 +87,7 @@ enum IssueId {
     ArchiveCycle,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum IssueAction {
     Fixed,
@@ -106,10 +108,9 @@ pub fn repair_corpus(
     let mut writer = RepairWriter::new(output, issues, config, corpus.root.clone(), &paths);
     writer.write_source_issues(&corpus.issues)?;
 
-    let stage = progress.stage_bar("fixing corpus", corpus.files.len() as u64);
+    let stage = progress.stage_bar("fixing corpus", corpus_size_bytes(corpus));
     for file in &corpus.files {
-        writer.repair_file(file)?;
-        stage.inc(1);
+        writer.repair_file(file, &stage)?;
         stage.set_message(format!(
             "fixing corpus: {} line(s), {} fixed, {} skipped",
             writer.summary.lines_read, writer.summary.lines_fixed, writer.summary.lines_skipped
@@ -170,6 +171,16 @@ struct RepairWriter<'a> {
     shard_writers: HashMap<BucketKey, BufWriter<File>>,
 }
 
+struct RawLine {
+    line_number: u64,
+    bytes: Vec<u8>,
+}
+
+struct ProcessedLine {
+    issues: Vec<CorpusIssue>,
+    output_lines: Vec<String>,
+}
+
 impl<'a> RepairWriter<'a> {
     fn new(
         output: BufWriter<File>,
@@ -214,7 +225,7 @@ impl<'a> RepairWriter<'a> {
         Ok(())
     }
 
-    fn repair_file(&mut self, path: &Path) -> Result<(), RepairError> {
+    fn repair_file(&mut self, path: &Path, progress: &StageProgress) -> Result<(), RepairError> {
         let file = File::open(path).map_err(|source| RepairError::Open {
             path: path.to_path_buf(),
             source,
@@ -222,6 +233,7 @@ impl<'a> RepairWriter<'a> {
         let mut reader = BufReader::new(file);
         let mut bytes = Vec::new();
         let mut line_number = 0;
+        let mut chunk = Vec::with_capacity(REPAIR_CHUNK_LINES);
 
         loop {
             bytes.clear();
@@ -233,141 +245,57 @@ impl<'a> RepairWriter<'a> {
                         source,
                     })?;
             if read == 0 {
+                self.repair_chunk(path, std::mem::take(&mut chunk))?;
                 return Ok(());
             }
 
             line_number += 1;
             self.summary.lines_read += 1;
+            progress.inc(read as u64);
             trim_line_ending(&mut bytes);
-            self.repair_line(path, line_number, &bytes)?;
+            chunk.push(RawLine {
+                line_number,
+                bytes: bytes.clone(),
+            });
+
+            if chunk.len() == REPAIR_CHUNK_LINES {
+                self.repair_chunk(path, std::mem::take(&mut chunk))?;
+            }
         }
     }
 
-    fn repair_line(
-        &mut self,
-        path: &Path,
-        line_number: u64,
-        bytes: &[u8],
-    ) -> Result<(), RepairError> {
-        let text = match std::str::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(error) => {
-                self.skip(
-                    path,
-                    line_number,
-                    IssueId::InvalidUtf8,
-                    error.to_string(),
-                    None,
-                )?;
-                return Ok(());
-            }
-        };
-
-        let canonicalized = canonicalize_line(text, &self.config.canonicalization);
-        if canonicalize_line(&canonicalized.text, &self.config.canonicalization).text
-            != canonicalized.text
-        {
-            self.skip(
-                path,
-                line_number,
-                IssueId::NonIdempotentCanonicalization,
-                "line changed after a second canonicalization pass",
-                maybe_line_text(text, self.config.validation.include_line_text_in_log),
-            )?;
+    fn repair_chunk(&mut self, path: &Path, chunk: Vec<RawLine>) -> Result<(), RepairError> {
+        if chunk.is_empty() {
             return Ok(());
         }
 
-        if canonicalized.changed {
-            self.fix(
-                path,
-                line_number,
-                "line changed under configured canonicalization",
-                maybe_line_text(text, self.config.validation.include_line_text_in_log),
-            )?;
-        }
-
-        let max_sentence_length = self.config.sentencepiece.max_sentence_length as usize;
-        let Some(chunks) = chunk_line(&canonicalized.text, max_sentence_length) else {
-            self.skip(
-                path,
-                line_number,
-                IssueId::MaxSentenceLength,
-                format!(
-                    "canonicalized line has a grapheme cluster over max_sentence_length {}",
-                    self.config.sentencepiece.max_sentence_length
-                ),
-                maybe_line_text(text, self.config.validation.include_line_text_in_log),
-            )?;
-            return Ok(());
-        };
-
-        if chunks.len() > 1 {
-            self.fix_with_id(
-                path,
-                line_number,
-                IssueId::ChunkedLongLine,
-                format!(
-                    "canonicalized line is {} byte(s), split into {} chunk(s) at max_sentence_length {}",
-                    canonicalized.text.len(),
-                    chunks.len(),
-                    self.config.sentencepiece.max_sentence_length
-                ),
-                maybe_line_text(text, self.config.validation.include_line_text_in_log),
-            )?;
-        }
-
-        for chunk in chunks {
-            self.write_line(path, &chunk)?;
+        let processed = chunk
+            .into_par_iter()
+            .map(|line| process_raw_line(self.config, path, line))
+            .collect::<Vec<_>>();
+        for line in processed {
+            self.apply_processed_line(path, line)?;
         }
         Ok(())
     }
 
-    fn fix(
+    fn apply_processed_line(
         &mut self,
-        path: &Path,
-        line_number: u64,
-        reason: impl Into<String>,
-        line_text: Option<String>,
+        source_path: &Path,
+        line: ProcessedLine,
     ) -> Result<(), RepairError> {
-        self.fix_with_id(path, line_number, IssueId::Canonicalized, reason, line_text)
-    }
+        for issue in line.issues {
+            match issue.action {
+                IssueAction::Fixed => self.summary.lines_fixed += 1,
+                IssueAction::Skipped => self.summary.lines_skipped += 1,
+            }
+            self.write_issue(issue)?;
+        }
 
-    fn fix_with_id(
-        &mut self,
-        path: &Path,
-        line_number: u64,
-        id: IssueId,
-        reason: impl Into<String>,
-        line_text: Option<String>,
-    ) -> Result<(), RepairError> {
-        self.summary.lines_fixed += 1;
-        self.write_issue(CorpusIssue {
-            id,
-            action: IssueAction::Fixed,
-            path: path.to_path_buf(),
-            line_number: Some(line_number),
-            reason: reason.into(),
-            line_text,
-        })
-    }
-
-    fn skip(
-        &mut self,
-        path: &Path,
-        line_number: u64,
-        id: IssueId,
-        reason: impl Into<String>,
-        line_text: Option<String>,
-    ) -> Result<(), RepairError> {
-        self.summary.lines_skipped += 1;
-        self.write_issue(CorpusIssue {
-            id,
-            action: IssueAction::Skipped,
-            path: path.to_path_buf(),
-            line_number: Some(line_number),
-            reason: reason.into(),
-            line_text,
-        })
+        for chunk in line.output_lines {
+            self.write_line(source_path, &chunk)?;
+        }
+        Ok(())
     }
 
     fn write_line(&mut self, source_path: &Path, line: &str) -> Result<(), RepairError> {
@@ -452,6 +380,109 @@ impl<'a> RepairWriter<'a> {
     }
 }
 
+fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> ProcessedLine {
+    let text = match std::str::from_utf8(&raw.bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            return ProcessedLine {
+                issues: vec![issue(
+                    path,
+                    raw.line_number,
+                    IssueId::InvalidUtf8,
+                    IssueAction::Skipped,
+                    error.to_string(),
+                    None,
+                )],
+                output_lines: Vec::new(),
+            };
+        }
+    };
+
+    let mut issues = Vec::new();
+    let canonicalized = canonicalize_line(text, &config.canonicalization);
+    if canonicalize_line(&canonicalized.text, &config.canonicalization).text != canonicalized.text {
+        return ProcessedLine {
+            issues: vec![issue(
+                path,
+                raw.line_number,
+                IssueId::NonIdempotentCanonicalization,
+                IssueAction::Skipped,
+                "line changed after a second canonicalization pass",
+                maybe_line_text(text, config.validation.include_line_text_in_log),
+            )],
+            output_lines: Vec::new(),
+        };
+    }
+
+    if canonicalized.changed {
+        issues.push(issue(
+            path,
+            raw.line_number,
+            IssueId::Canonicalized,
+            IssueAction::Fixed,
+            "line changed under configured canonicalization",
+            maybe_line_text(text, config.validation.include_line_text_in_log),
+        ));
+    }
+
+    let max_sentence_length = config.sentencepiece.max_sentence_length as usize;
+    let Some(chunks) = chunk_line(&canonicalized.text, max_sentence_length) else {
+        return ProcessedLine {
+            issues: vec![issue(
+                path,
+                raw.line_number,
+                IssueId::MaxSentenceLength,
+                IssueAction::Skipped,
+                format!(
+                    "canonicalized line has a grapheme cluster over max_sentence_length {}",
+                    config.sentencepiece.max_sentence_length
+                ),
+                maybe_line_text(text, config.validation.include_line_text_in_log),
+            )],
+            output_lines: Vec::new(),
+        };
+    };
+
+    if chunks.len() > 1 {
+        issues.push(issue(
+            path,
+            raw.line_number,
+            IssueId::ChunkedLongLine,
+            IssueAction::Fixed,
+            format!(
+                "canonicalized line is {} byte(s), split into {} chunk(s) at max_sentence_length {}",
+                canonicalized.text.len(),
+                chunks.len(),
+                config.sentencepiece.max_sentence_length
+            ),
+            maybe_line_text(text, config.validation.include_line_text_in_log),
+        ));
+    }
+
+    ProcessedLine {
+        issues,
+        output_lines: chunks,
+    }
+}
+
+fn issue(
+    path: &Path,
+    line_number: u64,
+    id: IssueId,
+    action: IssueAction,
+    reason: impl Into<String>,
+    line_text: Option<String>,
+) -> CorpusIssue {
+    CorpusIssue {
+        id,
+        action,
+        path: path.to_path_buf(),
+        line_number: Some(line_number),
+        reason: reason.into(),
+        line_text,
+    }
+}
+
 impl IssueId {
     fn from_source(id: CorpusSourceIssueId) -> Self {
         match id {
@@ -488,6 +519,15 @@ fn classification_path(corpus_root: &Path, source_path: &Path) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| source_path.to_path_buf()),
     }
+}
+
+fn corpus_size_bytes(corpus: &DiscoveredCorpus) -> u64 {
+    corpus
+        .files
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 fn chunk_line(text: &str, max_bytes: usize) -> Option<Vec<String>> {
@@ -765,6 +805,34 @@ mod tests {
             chunk_line("éééé", 5).expect("chunk line"),
             vec!["éé".to_owned(), "éé".to_owned()]
         );
+    }
+
+    #[test]
+    fn preserves_line_order_across_parallel_chunks() {
+        let temp = TempDir::new().expect("temp dir");
+        let input = temp.path().join("raw.txt");
+        let mut corpus_text = String::new();
+        for index in 0..(REPAIR_CHUNK_LINES + 3) {
+            corpus_text.push_str(&format!("line-{index}\n"));
+        }
+        fs::write(&input, corpus_text).expect("write input");
+        let output = temp.path().join("run");
+        let config = config(&output, &input);
+        let corpus = DiscoveredCorpus {
+            root: input.clone(),
+            files: vec![input],
+            issues: vec![],
+        };
+        let progress = ProgressReporter::new(true);
+
+        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+        let fixed = fs::read_to_string(output.join(FIXED_CORPUS_NAME)).expect("read fixed corpus");
+        let lines = fixed.lines().collect::<Vec<_>>();
+
+        assert_eq!(summary.lines_written, (REPAIR_CHUNK_LINES + 3) as u64);
+        assert_eq!(lines.first(), Some(&"line-0"));
+        let expected_last = format!("line-{}", REPAIR_CHUNK_LINES + 2);
+        assert_eq!(lines.last().copied(), Some(expected_last.as_str()));
     }
 
     #[test]

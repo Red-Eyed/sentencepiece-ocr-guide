@@ -13,6 +13,7 @@ logged, lightly balanced, and easy to inspect before training.
 - Detect text, archives, and compressed files by content rather than filename.
 - Fix OCR-relevant Unicode issues while preserving characters that matter for labels.
 - Split oversized OCR lines into safe chunks, skip only unrepairable lines, and log every action.
+- Repair line chunks in parallel while writing deterministic corpus outputs.
 - Build several meaningful training corpus files instead of one anonymous bag.
 - Train SentencePiece with OCR-safe defaults from `cfg.json.ocr`.
 - Keep progress visible through long discovery, repair, balancing, and training stages.

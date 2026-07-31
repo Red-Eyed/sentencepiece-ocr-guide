@@ -222,8 +222,9 @@ and skips unreadable sources with a log entry instead of stopping the run.
 
 The program repairs text for OCR tokenizer training: Unicode normalization, OCR-specific
 cleanup, safe whitespace handling, safe chunking for oversized lines, and removal of broken
-lines. Fixes, chunks, and skipped lines are logged to `reports/corpus_issues.jsonl`. The
-original corpus is never modified.
+lines. Repair work is split into line chunks and processed through a global thread pool, while
+writes stay deterministic. Fixes, chunks, and skipped lines are logged to
+`reports/corpus_issues.jsonl`. The original corpus is never modified.
 
 ### 4. Build Training Corpus
 
