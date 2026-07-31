@@ -6,7 +6,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::config::EffectiveConfig;
-use crate::corpus::DiscoveredCorpus;
+use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId, DiscoveredCorpus};
 use crate::normalize::canonicalize_line;
 use crate::progress::ProgressReporter;
 
@@ -21,6 +21,7 @@ pub struct RepairSummary {
     pub lines_written: u64,
     pub lines_fixed: u64,
     pub lines_skipped: u64,
+    pub source_issues: usize,
 }
 
 #[derive(Debug, Error)]
@@ -52,7 +53,8 @@ struct CorpusIssue {
     id: IssueId,
     action: IssueAction,
     path: PathBuf,
-    line_number: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_number: Option<u64>,
     reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     line_text: Option<String>,
@@ -65,6 +67,10 @@ enum IssueId {
     Canonicalized,
     NonIdempotentCanonicalization,
     MaxSentenceLength,
+    UnsupportedFile,
+    ArchiveReadFailed,
+    ArchiveDepthExceeded,
+    ArchiveCycle,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +92,7 @@ pub fn repair_corpus(
     let output = open_writer(&paths.fixed_corpus)?;
     let issues = open_writer(&paths.issue_log)?;
     let mut writer = RepairWriter::new(output, issues, config, &paths);
+    writer.write_source_issues(&corpus.issues)?;
 
     let stage = progress.stage("fixing corpus");
     for file in &corpus.files {
@@ -159,8 +166,24 @@ impl<'a> RepairWriter<'a> {
                 lines_written: 0,
                 lines_fixed: 0,
                 lines_skipped: 0,
+                source_issues: 0,
             },
         }
+    }
+
+    fn write_source_issues(&mut self, issues: &[CorpusSourceIssue]) -> Result<(), RepairError> {
+        for issue in issues {
+            self.summary.source_issues += 1;
+            self.write_issue(CorpusIssue {
+                id: IssueId::from_source(issue.id),
+                action: IssueAction::Skipped,
+                path: issue.path.clone(),
+                line_number: None,
+                reason: issue.reason.clone(),
+                line_text: None,
+            })?;
+        }
+        Ok(())
     }
 
     fn repair_file(&mut self, path: &Path) -> Result<(), RepairError> {
@@ -265,7 +288,7 @@ impl<'a> RepairWriter<'a> {
             id: IssueId::Canonicalized,
             action: IssueAction::Fixed,
             path: path.to_path_buf(),
-            line_number,
+            line_number: Some(line_number),
             reason: reason.into(),
             line_text,
         })
@@ -284,7 +307,7 @@ impl<'a> RepairWriter<'a> {
             id,
             action: IssueAction::Skipped,
             path: path.to_path_buf(),
-            line_number,
+            line_number: Some(line_number),
             reason: reason.into(),
             line_text,
         })
@@ -325,6 +348,17 @@ impl<'a> RepairWriter<'a> {
             source,
         })?;
         Ok(self.summary)
+    }
+}
+
+impl IssueId {
+    fn from_source(id: CorpusSourceIssueId) -> Self {
+        match id {
+            CorpusSourceIssueId::UnsupportedFile => Self::UnsupportedFile,
+            CorpusSourceIssueId::ArchiveReadFailed => Self::ArchiveReadFailed,
+            CorpusSourceIssueId::ArchiveDepthExceeded => Self::ArchiveDepthExceeded,
+            CorpusSourceIssueId::ArchiveCycle => Self::ArchiveCycle,
+        }
     }
 }
 
@@ -389,6 +423,7 @@ mod tests {
         SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind, UnicodeForm,
         ValidationConfig, ValidationMode,
     };
+    use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId};
 
     use super::*;
 
@@ -463,6 +498,7 @@ mod tests {
         let corpus = DiscoveredCorpus {
             root: input.clone(),
             files: vec![input],
+            issues: vec![],
         };
         let progress = ProgressReporter::new(true);
 
@@ -493,6 +529,7 @@ mod tests {
         let corpus = DiscoveredCorpus {
             root: input.clone(),
             files: vec![input],
+            issues: vec![],
         };
         let progress = ProgressReporter::new(true);
 
@@ -510,5 +547,30 @@ mod tests {
                 .expect("read issue log")
                 .contains("\"id\":\"invalid_utf8\"")
         );
+    }
+
+    #[test]
+    fn logs_source_level_discovery_issues() {
+        let temp = TempDir::new().expect("temp dir");
+        let output = temp.path().join("run");
+        let config = config(&output, temp.path());
+        let corpus = DiscoveredCorpus {
+            root: temp.path().to_path_buf(),
+            files: vec![],
+            issues: vec![CorpusSourceIssue {
+                id: CorpusSourceIssueId::UnsupportedFile,
+                path: temp.path().join("binary"),
+                reason: "not text".to_owned(),
+            }],
+        };
+        let progress = ProgressReporter::new(true);
+
+        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+
+        assert_eq!(summary.source_issues, 1);
+        let issue_log =
+            fs::read_to_string(output.join("reports/corpus_issues.jsonl")).expect("read issue log");
+        assert!(issue_log.contains("\"id\":\"unsupported_file\""));
+        assert!(issue_log.contains("\"action\":\"skipped\""));
     }
 }

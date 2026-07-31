@@ -451,6 +451,7 @@ mod tests {
             lines_written: 9,
             lines_fixed: 1,
             lines_skipped: 1,
+            source_issues: 0,
         };
         let paths = TrainerPaths::from_config(&config);
 

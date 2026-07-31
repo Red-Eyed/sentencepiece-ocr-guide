@@ -43,6 +43,7 @@ struct TrainSummary {
     lines_written: u64,
     lines_fixed: u64,
     lines_skipped: u64,
+    source_issues: usize,
     model: PathBuf,
     vocab: PathBuf,
     trainer_output: PathBuf,
@@ -63,19 +64,32 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
     let config = load_config(&args, &progress)?;
     let corpus = discover_corpus(&config, &progress)?;
     let repair = repair_corpus(&config, &corpus, &progress)?;
+    if repair.lines_written == 0 {
+        bail!(
+            "no usable text lines found under {}; see {}",
+            config.corpus.path.display(),
+            repair.issue_log.display()
+        );
+    }
     let trainer = train_sentencepiece(&config, &repair, &progress)?;
     let summary = TrainSummary::from_outputs(&config, &corpus, &repair, &trainer);
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
+        let source_issue_suffix = if summary.source_issues == 0 {
+            String::new()
+        } else {
+            format!(", {} source issue(s) logged", summary.source_issues)
+        };
         println!(
-            "Trained: preset `{}`, {} text file(s), {} line(s) written, {} fixed, {} skipped, model `{}`",
+            "Trained: preset `{}`, {} text file(s), {} line(s) written, {} fixed, {} skipped{}, model `{}`",
             summary.preset,
             summary.text_files,
             summary.lines_written,
             summary.lines_fixed,
             summary.lines_skipped,
+            source_issue_suffix,
             summary.model.display()
         );
     }
@@ -96,12 +110,9 @@ fn discover_corpus(
     progress: &ProgressReporter,
 ) -> Result<DiscoveredCorpus> {
     let stage = progress.stage("discovering corpus text files");
-    let corpus = corpus::discover_text_files(&config.corpus.path)
+    let unpack_dir = config.output.work_dir.join("unpacked");
+    let corpus = corpus::discover_text_files(&config.corpus.path, &unpack_dir)
         .with_context(|| format!("could not discover {}", config.corpus.path.display()))?;
-
-    if corpus.files.is_empty() {
-        bail!("no text files found under {}", config.corpus.path.display());
-    }
 
     stage.finish(format!("found {} text file(s)", corpus.files.len()));
     Ok(corpus)
@@ -141,6 +152,7 @@ impl TrainSummary {
             lines_written: repair.lines_written,
             lines_fixed: repair.lines_fixed,
             lines_skipped: repair.lines_skipped,
+            source_issues: repair.source_issues,
             model: trainer.model.clone(),
             vocab: trainer.vocab.clone(),
             trainer_output: config.output.work_dir.join("trainer_output.json"),

@@ -35,6 +35,12 @@ model preprocessing tool. That changes the priorities:
 The program should therefore make corpus canonicalization and reporting the hard center of the
 tool, and keep SentencePiece training behind a replaceable adapter.
 
+The corpus should be treated as an IRL delivery, not a clean benchmark folder. The tool must
+expect unreliable filenames, missing source metadata, duplicate vendor drops, archives inside
+archives, compressed text files, binary sidecars, mixed Unicode encodings, extractor artifacts,
+and badly imbalanced scripts. Directory structure can be kept as provenance, but correctness
+must come from content sniffing and typed repair policy rather than user pre-sorting.
+
 ## Goals
 
 - Accept a small JSON config that defines corpus location, output location, and preset choice.
@@ -230,10 +236,12 @@ occurs.
 
 ### 2. Scan raw corpus
 
-The scanner accepts `corpus.path` as either one text file or a directory. If it is a directory,
-it recursively discovers text files with a `.txt` extension, ignores hidden directories and
-common build/output directories, streams UTF-8 lines, normalizes line endings to LF in the fixed
-corpus, and records:
+The scanner accepts `corpus.path` as either one file or a directory. Discovery is based on
+content, not filename: it sniffs magic bytes for archives and compressed streams, recursively
+unpacks nested containers into `work_dir/unpacked/`, and treats UTF-8 text-like payloads as
+corpus sources regardless of extension. Unsupported files and broken archives are skipped and
+logged. Text sources are streamed, line endings are normalized to LF in the fixed corpus, and
+the scanner records:
 
 - line count, byte count, char count, and max line length;
 - source attribution from file path;
