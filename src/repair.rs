@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use thiserror::Error;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::balance::{classify_line, shard_file_name, BucketKey};
 use crate::config::EffectiveConfig;
@@ -75,6 +76,7 @@ struct CorpusIssue {
 enum IssueId {
     InvalidUtf8,
     Canonicalized,
+    ChunkedLongLine,
     NonIdempotentCanonicalization,
     MaxSentenceLength,
     UnsupportedFile,
@@ -274,21 +276,6 @@ impl<'a> RepairWriter<'a> {
             return Ok(());
         }
 
-        if canonicalized.text.len() > self.config.sentencepiece.max_sentence_length as usize {
-            self.skip(
-                path,
-                line_number,
-                IssueId::MaxSentenceLength,
-                format!(
-                    "canonicalized line is {} byte(s), over max_sentence_length {}",
-                    canonicalized.text.len(),
-                    self.config.sentencepiece.max_sentence_length
-                ),
-                maybe_line_text(text, self.config.validation.include_line_text_in_log),
-            )?;
-            return Ok(());
-        }
-
         if canonicalized.changed {
             self.fix(
                 path,
@@ -298,7 +285,40 @@ impl<'a> RepairWriter<'a> {
             )?;
         }
 
-        self.write_line(path, &canonicalized.text)
+        let max_sentence_length = self.config.sentencepiece.max_sentence_length as usize;
+        let Some(chunks) = chunk_line(&canonicalized.text, max_sentence_length) else {
+            self.skip(
+                path,
+                line_number,
+                IssueId::MaxSentenceLength,
+                format!(
+                    "canonicalized line has a grapheme cluster over max_sentence_length {}",
+                    self.config.sentencepiece.max_sentence_length
+                ),
+                maybe_line_text(text, self.config.validation.include_line_text_in_log),
+            )?;
+            return Ok(());
+        };
+
+        if chunks.len() > 1 {
+            self.fix_with_id(
+                path,
+                line_number,
+                IssueId::ChunkedLongLine,
+                format!(
+                    "canonicalized line is {} byte(s), split into {} chunk(s) at max_sentence_length {}",
+                    canonicalized.text.len(),
+                    chunks.len(),
+                    self.config.sentencepiece.max_sentence_length
+                ),
+                maybe_line_text(text, self.config.validation.include_line_text_in_log),
+            )?;
+        }
+
+        for chunk in chunks {
+            self.write_line(path, &chunk)?;
+        }
+        Ok(())
     }
 
     fn fix(
@@ -308,9 +328,20 @@ impl<'a> RepairWriter<'a> {
         reason: impl Into<String>,
         line_text: Option<String>,
     ) -> Result<(), RepairError> {
+        self.fix_with_id(path, line_number, IssueId::Canonicalized, reason, line_text)
+    }
+
+    fn fix_with_id(
+        &mut self,
+        path: &Path,
+        line_number: u64,
+        id: IssueId,
+        reason: impl Into<String>,
+        line_text: Option<String>,
+    ) -> Result<(), RepairError> {
         self.summary.lines_fixed += 1;
         self.write_issue(CorpusIssue {
-            id: IssueId::Canonicalized,
+            id,
             action: IssueAction::Fixed,
             path: path.to_path_buf(),
             line_number: Some(line_number),
@@ -456,6 +487,63 @@ fn classification_path(corpus_root: &Path, source_path: &Path) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| source_path.to_path_buf()),
     }
+}
+
+fn chunk_line(text: &str, max_bytes: usize) -> Option<Vec<String>> {
+    if max_bytes == 0 {
+        return None;
+    }
+
+    if text.len() <= max_bytes {
+        return Some(vec![text.to_owned()]);
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let limit = (start + max_bytes).min(text.len());
+        let end = safe_chunk_end(text, start, limit)?;
+        if end <= start {
+            return None;
+        }
+        chunks.push(text[start..end].to_owned());
+        start = end;
+    }
+    Some(chunks)
+}
+
+fn safe_chunk_end(text: &str, start: usize, limit: usize) -> Option<usize> {
+    let mut last_grapheme_end = None;
+    let mut last_preferred_end = None;
+
+    for (offset, grapheme) in text[start..].grapheme_indices(true) {
+        let end = start + offset + grapheme.len();
+        if end > limit {
+            break;
+        }
+
+        last_grapheme_end = Some(end);
+        if end < text.len() && is_preferred_split(grapheme) {
+            last_preferred_end = Some(end);
+        }
+    }
+
+    last_preferred_end.or(last_grapheme_end)
+}
+
+fn is_preferred_split(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
+        || grapheme
+            .chars()
+            .last()
+            .is_some_and(is_preferred_split_punctuation)
+}
+
+fn is_preferred_split_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+    )
 }
 
 fn create_parent_dir(path: &Path) -> Result<(), RepairError> {
@@ -636,6 +724,45 @@ mod tests {
             fs::read_to_string(output.join("reports/corpus_issues.jsonl"))
                 .expect("read issue log")
                 .contains("\"id\":\"invalid_utf8\"")
+        );
+    }
+
+    #[test]
+    fn chunks_long_ocr_lines_instead_of_skipping() {
+        let temp = TempDir::new().expect("temp dir");
+        let input = temp.path().join("raw.txt");
+        fs::write(&input, "alpha beta gamma\n").expect("write input");
+        let output = temp.path().join("run");
+        let mut config = config(&output, &input);
+        config.sentencepiece.max_sentence_length = 10;
+        let corpus = DiscoveredCorpus {
+            root: input.clone(),
+            files: vec![input],
+            issues: vec![],
+        };
+        let progress = ProgressReporter::new(true);
+
+        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+
+        assert_eq!(summary.lines_read, 1);
+        assert_eq!(summary.lines_written, 3);
+        assert_eq!(summary.lines_skipped, 0);
+        assert_eq!(
+            fs::read_to_string(output.join(FIXED_CORPUS_NAME)).expect("read fixed corpus"),
+            "alpha \nbeta \ngamma\n"
+        );
+        assert!(
+            fs::read_to_string(output.join("reports/corpus_issues.jsonl"))
+                .expect("read issue log")
+                .contains("\"id\":\"chunked_long_line\"")
+        );
+    }
+
+    #[test]
+    fn chunks_unspaced_text_on_grapheme_boundaries() {
+        assert_eq!(
+            chunk_line("éééé", 5).expect("chunk line"),
+            vec!["éé".to_owned(), "éé".to_owned()]
         );
     }
 

@@ -72,8 +72,9 @@ sharper softmax separation and better per-class accuracy. The cost is longer seq
 is a latency cost, not an accuracy cost.
 
 **`max_sentence_length=16384`** (default 4192 bytes) — SentencePiece **silently drops** lines
-longer than this. Raise it for long LaTeX (matrices, multi-line derivations) and verify against
-your actual line-length distribution rather than assuming.
+longer than this. `spm-ocr` chunks oversized OCR lines before training, and skips only lines
+that cannot be chunked safely. Raise it for long LaTeX (matrices, multi-line derivations) and
+verify against your actual line-length distribution rather than assuming.
 
 **`user_defined_symbols`** — forces frequent LaTeX commands to survive as single unsplittable
 tokens. Curate the list from real command-frequency counts on your corpus, not from the example

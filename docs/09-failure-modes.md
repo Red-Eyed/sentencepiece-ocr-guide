@@ -318,8 +318,9 @@ with α-smoothing, not by `input_sentence_size` — see [corpus engineering](05-
 **15. Lines silently dropped by `max_sentence_length`.** The default is 4192 *bytes*, and
 SentencePiece drops longer lines without an error. The dropped lines are not a random sample:
 they are your longest, most complex examples — multi-line derivations, wide tables, dense
-pages. You lose precisely the hard cases, and the loss is invisible unless you compare the
-trainer's line count against your own.
+pages. `spm-ocr` should chunk these OCR lines before training and skip only chunks that cannot
+be formed safely; otherwise you lose precisely the hard cases, and the loss is invisible unless
+you compare the trainer's line count against your own.
 
 **16. Corpus/deployment domain mismatch.** A tokenizer trained on clean digital text and
 deployed on receipts, forms and handwriting has learned merges for the wrong distribution. Not

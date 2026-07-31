@@ -81,9 +81,9 @@ spm-ocr train --config cfg.json
 
 `train` runs the complete pipeline: scan raw corpus, fix corpus, balance and assemble the
 training file, train SentencePiece, and validate the resulting model. Corpus defects are fixed
-when the policy is lossless, skipped when a line cannot be safely repaired, and logged to a
-JSONL issue file. Validation findings are reported; they do not turn a completed run into a
-failed command.
+when the policy is lossless, oversized OCR lines are split into safe chunks, lines are skipped
+only when they cannot be safely repaired or chunked, and every action is logged to a JSONL issue
+file. Validation findings are reported; they do not turn a completed run into a failed command.
 
 The MVP calls the Python `sentencepiece` package through a `Trainer` trait. Rust writes a typed
 `trainer_request.json`, invokes a tiny Python bridge, and reads a typed `trainer_output.json`.
@@ -221,8 +221,9 @@ and skips unreadable sources with a log entry instead of stopping the run.
 ### 3. Fix Corpus
 
 The program repairs text for OCR tokenizer training: Unicode normalization, OCR-specific
-cleanup, safe whitespace handling, and removal of broken lines. Fixes and skipped lines are
-logged to `reports/corpus_issues.jsonl`. The original corpus is never modified.
+cleanup, safe whitespace handling, safe chunking for oversized lines, and removal of broken
+lines. Fixes, chunks, and skipped lines are logged to `reports/corpus_issues.jsonl`. The
+original corpus is never modified.
 
 ### 4. Build Training Corpus
 
@@ -251,7 +252,7 @@ results into the run reports:
 - no phantom leading prefix on non-whitespace-leading text;
 - round-trip exactness on stratified samples;
 - byte-fallback rate by script/domain;
-- long-line drop estimate using configured `max_sentence_length`;
+- long-line chunking and skip counts using configured `max_sentence_length`;
 - user-defined symbols encode atomically inside real examples.
 
 Findings are emitted as structured records:

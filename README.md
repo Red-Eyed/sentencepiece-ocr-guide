@@ -12,7 +12,7 @@ logged, lightly balanced, and easy to inspect before training.
 - Pass one corpus path instead of pre-sorting files by extension or language.
 - Detect text, archives, and compressed files by content rather than filename.
 - Fix OCR-relevant Unicode issues while preserving characters that matter for labels.
-- Skip unrepairable lines without stopping the run, and log every fix or skip.
+- Split oversized OCR lines into safe chunks, skip only unrepairable lines, and log every action.
 - Build several meaningful training corpus files instead of one anonymous bag.
 - Train SentencePiece with OCR-safe defaults from `cfg.json.ocr`.
 - Keep progress visible through long discovery, repair, balancing, and training stages.
@@ -21,7 +21,7 @@ logged, lightly balanced, and easy to inspect before training.
 
 1. Read settings from `cfg.json` and apply the selected OCR preset.
 2. Find text from one file or a recursive directory scan, unpacking archives and compressed inputs.
-3. Fix the corpus, preserving the original files and logging every repair or skipped line.
+3. Fix the corpus, preserving the original files and logging every repair, chunk, or skipped line.
 4. Build several lightly balanced training corpus files under `work_dir/train_corpus/`.
 5. Train SentencePiece and write the model, vocabulary, and reports under `work_dir/`.
 
