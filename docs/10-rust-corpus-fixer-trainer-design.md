@@ -206,146 +206,40 @@ After preset expansion, the effective config contains the full policy:
 
 ## Pipeline
 
-### 1. Load and validate config
+### 1. Read Settings
 
-`RawConfig` is deserialized with strict Rust types, merged with the selected preset from
-`cfg.json.ocr`, and converted into `EffectiveConfig`. Paths become `PathBuf`, trainer settings
-become typed enums or bounded numeric wrappers, and date/time-like values are not accepted as
-strings unless they are parsed at the boundary.
+The user points the command at `cfg.json`. The program applies the selected OCR preset,
+checks that the settings are usable, and writes the final expanded settings to
+`work_dir/effective_config.json`.
 
-Preset merge rules are simple:
+### 2. Find Text
 
-- `preset` defaults to `cfg.json.ocr.default`.
-- A preset can `extend` one parent preset.
-- User config wins over preset fields.
-- List-valued fields replace the parent list rather than appending to it, so
-  `user_defined_symbols` stays predictable.
-- The expanded `EffectiveConfig` is written to `work_dir/effective_config.json`.
+The user gives either one file or one directory. If it is a directory, the program searches it
+recursively. It detects text, archives, and compressed files by content, unpacks nested inputs,
+and skips unreadable sources with a log entry instead of stopping the run.
 
-Dangerous SentencePiece settings are repaired to the selected preset's safe value and logged in
-`reports/corpus_issues.jsonl`. The command fails only when the config cannot be parsed, a path
-cannot be accessed, an output cannot be written, the Python trainer fails, or an internal error
-occurs.
+### 3. Fix Corpus
 
-| Setting | Required default |
-|---|---|
-| `model_type` | `bpe` |
-| `byte_fallback` | `true` |
-| `normalization_rule_name` | `identity` |
-| `add_dummy_prefix` | `false` |
-| `remove_extra_whitespaces` | `false` |
-| `split_by_unicode_script` | `true` |
-| `split_digits` | `true` |
-| `max_sentencepiece_length` | preset value |
-| `max_sentence_length` | preset value; over-limit lines are skipped and logged |
+The program repairs text for OCR tokenizer training: Unicode normalization, OCR-specific
+cleanup, safe whitespace handling, and removal of broken lines. Fixes and skipped lines are
+logged to `reports/corpus_issues.jsonl`. The original corpus is never modified.
 
-### 2. Scan raw corpus
+### 4. Build Training Corpus
 
-The scanner accepts `corpus.path` as either one file or a directory. Discovery is based on
-content, not filename: it sniffs magic bytes for archives and compressed streams, recursively
-unpacks nested containers into `work_dir/unpacked/`, and treats UTF-8 text-like payloads as
-corpus sources regardless of extension. Unsupported files and broken archives are skipped and
-logged. Text sources are streamed, line endings are normalized to LF in the fixed corpus, and
-the scanner records:
+The repaired text is lightly balanced so one huge source, script, language hint, or line shape
+does not dominate training. Balancing is conservative: small groups are kept, and large groups
+are not cut too aggressively. The result is written as several meaningful files under
+`work_dir/train_corpus/`.
 
-- line count, byte count, char count, and max line length;
-- source attribution from file path;
-- script/domain bucket estimates;
-- line counts affected by each canonicalization axis;
-- soft-hyphen counts split by line-final and mid-line position;
-- preserved compatibility rows such as fullwidth forms, ligatures, dashes, quotes, ZWJ, and ZWNJ.
+### 5. Train Tokenizer
 
-This produces `scan.raw.json` and `scan.raw.md`. The report intentionally includes rows that
-must remain non-zero, because preserving a distinction is also a decision.
+The program trains SentencePiece on all files in `work_dir/train_corpus/` and writes the model,
+vocabulary, trainer output, reports, and manifest under `work_dir/`.
 
-### 3. Canonicalize
+## Output Checks
 
-Every line passes through one chokepoint. Repairable issues are fixed in place for the fixed
-corpus; unrepairable issues are skipped and logged with file path, line number, issue id, and
-reason:
-
-```text
-strip BOM and ZWSP
-map NBSP to U+0020
-fold Arabic presentation forms only
-handle soft hyphen according to configured positional policy
-normalize to NFC
-assert canonicalize(line) == line after transformation
-```
-
-The canonicalizer preserves fullwidth forms, ligatures, Arabic-Indic digits, quotes, dashes,
-U+3000, ZWJ, ZWNJ, and cross-script homoglyphs.
-
-Examples of skipped lines:
-
-- invalid UTF-8 byte sequence;
-- line still not idempotent after canonicalization;
-- line exceeds the configured `max_sentence_length` and cannot be chunked safely;
-- empty or whitespace-only line, if the preset disables whitespace-only examples.
-
-The repaired audit stream is written to `work_dir/fixed_corpus.txt`; training inputs are
-written as named corpus parts under `work_dir/train_corpus/`. The raw corpus is never
-modified.
-
-### 4. Balance and assemble
-
-If balancing is enabled, the program classifies canonicalized lines by multiple weak signals:
-domain, dominant Unicode script, ISO-like language hints in paths such as `en`, `eng`, `es`,
-`spa`, `ko`, or `kor`, source group, and line-length bin. Paths are treated as provenance, not
-truth: the script is discovered from text content, and path language hints only become one
-bucket feature among several. It computes target counts using exponential smoothing:
-
-```text
-P'(bucket) proportional to P(bucket)^alpha
-```
-
-Small buckets are fully retained. Large buckets are downsampled with a seeded streaming
-reservoir, bounded by `min_keep_fraction` and `max_downsample_ratio` so balancing remains
-conservative. The assembled training corpus is split into named part files such as
-`train-text-script_latin-lang_es-source_books-len_normal-part_0001-a1b2c3d4.txt`, so operators
-can inspect what each file means without decoding numeric ids.
-
-The output report includes actual versus target counts. If the final distribution misses
-targets beyond configured tolerance, training stops.
-
-### 5. Train SentencePiece
-
-The trainer adapter receives a fully materialized `TrainerRequest`:
-
-```rust
-trait Trainer {
-    fn train(&self, request: &TrainerRequest) -> Result<TrainerOutput, TrainError>;
-}
-```
-
-The initial implementation, `PythonSentencePieceTrainer`, writes this request as JSON and spawns
-the configured Python runner:
-
-```text
-uv run python -m spm_ocr_train_bridge runs/ocr-spm-v1/trainer_request.json
-```
-
-The Python bridge is deliberately thin:
-
-```python
-import json
-import sentencepiece as spm
-
-request = json.load(open(request_path, encoding="utf-8"))
-spm.SentencePieceTrainer.train(**request["sentencepiece"])
-```
-
-The real bridge should also write `trainer_output.json` with artifact paths, package version,
-stdout/stderr summaries, and elapsed time. It should not inspect corpus text and should not
-decide tokenizer policy. Rust remains responsible for validation and for generating a safe
-trainer request.
-
-The program writes `trainer_request.json` before execution so the exact Python call can be
-reviewed and replayed.
-
-### 6. Validate model and corpus together
-
-After training, the validation stage inspects `.model`, `.vocab`, and the fixed corpus:
+After training, the program checks the model, vocabulary, and repaired corpus and writes the
+results into the run reports:
 
 - no `<unk>` on sampled corpus encoding path;
 - model trainer settings match the config;
