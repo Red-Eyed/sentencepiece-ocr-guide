@@ -24,6 +24,11 @@ pub enum ConfigError {
     PresetCycle(String),
     #[error("missing required preset field `{0}` after expansion")]
     MissingPresetField(&'static str),
+    #[error("invalid preset field `{field}`: {reason}")]
+    InvalidPresetField {
+        field: &'static str,
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -31,6 +36,8 @@ pub enum ConfigError {
 pub struct RawConfig {
     #[serde(default)]
     pub preset: Option<String>,
+    #[serde(default)]
+    pub num_threads: Option<u32>,
     pub corpus: CorpusConfig,
     pub output: OutputConfig,
     #[serde(default)]
@@ -71,6 +78,8 @@ pub struct PresetConfig {
     #[serde(default)]
     pub extends: Option<String>,
     #[serde(default)]
+    pub num_threads: Option<u32>,
+    #[serde(default)]
     pub canonicalization: PartialCanonicalizationConfig,
     #[serde(default)]
     pub balancing: PartialBalancingConfig,
@@ -84,6 +93,7 @@ pub struct PresetConfig {
 #[serde(deny_unknown_fields)]
 pub struct EffectiveConfig {
     pub preset: String,
+    pub num_threads: u32,
     pub corpus: CorpusConfig,
     pub output: OutputConfig,
     pub canonicalization: CanonicalizationConfig,
@@ -219,7 +229,6 @@ pub struct SentencePieceConfig {
     pub shuffle_input_sentence: bool,
     pub train_extremely_large_corpus: bool,
     pub user_defined_symbols: Vec<String>,
-    pub num_threads: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -261,8 +270,6 @@ pub struct PartialSentencePieceConfig {
     pub train_extremely_large_corpus: Option<bool>,
     #[serde(default)]
     pub user_defined_symbols: Option<Vec<String>>,
-    #[serde(default)]
-    pub num_threads: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -330,6 +337,7 @@ pub enum LinePolicy {
 
 #[derive(Debug, Default)]
 struct ConfigBuilder {
+    num_threads: Option<u32>,
     canonicalization: PartialCanonicalizationConfig,
     balancing: PartialBalancingConfig,
     sentencepiece: PartialSentencePieceConfig,
@@ -404,6 +412,7 @@ fn apply_preset(
 
 impl ConfigBuilder {
     fn apply_preset(&mut self, preset: &PresetConfig) {
+        replace_if_some(&mut self.num_threads, preset.num_threads);
         self.canonicalization.merge(&preset.canonicalization);
         self.balancing.merge(&preset.balancing);
         self.sentencepiece.merge(&preset.sentencepiece);
@@ -411,6 +420,7 @@ impl ConfigBuilder {
     }
 
     fn apply_raw_overrides(&mut self, raw: &RawConfig) {
+        replace_if_some(&mut self.num_threads, raw.num_threads);
         self.canonicalization.merge(&raw.canonicalization);
         self.balancing.merge(&raw.balancing);
         self.sentencepiece.merge(&raw.sentencepiece);
@@ -425,6 +435,7 @@ impl ConfigBuilder {
     ) -> Result<EffectiveConfig, ConfigError> {
         Ok(EffectiveConfig {
             preset,
+            num_threads: require_positive_threads(self.num_threads)?,
             corpus,
             output,
             canonicalization: self.canonicalization.require()?,
@@ -560,7 +571,6 @@ impl PartialSentencePieceConfig {
             &mut self.user_defined_symbols,
             other.user_defined_symbols.clone(),
         );
-        replace_if_some(&mut self.num_threads, other.num_threads);
     }
 
     fn require(self) -> Result<SentencePieceConfig, ConfigError> {
@@ -619,7 +629,6 @@ impl PartialSentencePieceConfig {
                 self.user_defined_symbols,
                 "sentencepiece.user_defined_symbols",
             )?,
-            num_threads: require_field(self.num_threads, "sentencepiece.num_threads")?,
         })
     }
 }
@@ -666,6 +675,17 @@ fn require_field<T>(value: Option<T>, field: &'static str) -> Result<T, ConfigEr
     value.ok_or(ConfigError::MissingPresetField(field))
 }
 
+fn require_positive_threads(value: Option<u32>) -> Result<u32, ConfigError> {
+    let num_threads = require_field(value, "num_threads")?;
+    if num_threads == 0 {
+        return Err(ConfigError::InvalidPresetField {
+            field: "num_threads",
+            reason: "must be greater than zero",
+        });
+    }
+    Ok(num_threads)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +698,7 @@ mod tests {
     fn expands_default_preset() {
         let raw = RawConfig {
             preset: None,
+            num_threads: None,
             corpus: CorpusConfig {
                 path: "data/raw-corpus".into(),
             },
@@ -694,6 +715,7 @@ mod tests {
         let effective = expand_config(raw, &catalog()).expect("default preset expands");
 
         assert_eq!(effective.preset, "ocr_multilingual");
+        assert_eq!(effective.num_threads, 16);
         assert_eq!(effective.sentencepiece.model_type, ModelType::Bpe);
         assert!(effective.sentencepiece.byte_fallback);
         assert_eq!(effective.validation.line_policy, LinePolicy::FixOrSkip);
@@ -703,6 +725,7 @@ mod tests {
     fn child_preset_replaces_list_values() {
         let raw = RawConfig {
             preset: Some("ocr_math_heavy".to_owned()),
+            num_threads: None,
             corpus: CorpusConfig {
                 path: "data/raw-corpus".into(),
             },
@@ -729,6 +752,7 @@ mod tests {
     fn user_overrides_preset_field() {
         let raw = RawConfig {
             preset: Some("ocr_cjk_heavy".to_owned()),
+            num_threads: Some(8),
             corpus: CorpusConfig {
                 path: "data/raw-corpus".into(),
             },
@@ -747,6 +771,7 @@ mod tests {
 
         let effective = expand_config(raw, &catalog()).expect("user override expands");
 
+        assert_eq!(effective.num_threads, 8);
         assert_eq!(effective.sentencepiece.vocab_size, 32_000);
         assert_eq!(effective.sentencepiece.max_sentencepiece_length, 4);
     }
@@ -761,7 +786,37 @@ mod tests {
         assert_eq!(effective.preset, "ocr_multilingual");
         assert_eq!(effective.corpus.path, PathBuf::from("data/raw-corpus"));
         assert_eq!(effective.output.model_prefix, "ocr_tokenizer");
+        assert_eq!(effective.num_threads, 16);
         assert!(effective.sentencepiece.byte_fallback);
+    }
+
+    #[test]
+    fn rejects_zero_threads() {
+        let raw = RawConfig {
+            preset: None,
+            num_threads: Some(0),
+            corpus: CorpusConfig {
+                path: "data/raw-corpus".into(),
+            },
+            output: OutputConfig {
+                work_dir: "runs/ocr-spm-v1".into(),
+                model_prefix: "ocr_tokenizer".to_owned(),
+            },
+            canonicalization: PartialCanonicalizationConfig::default(),
+            balancing: PartialBalancingConfig::default(),
+            sentencepiece: PartialSentencePieceConfig::default(),
+            validation: PartialValidationConfig::default(),
+        };
+
+        let error = expand_config(raw, &catalog()).expect_err("zero threads should be invalid");
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidPresetField {
+                field: "num_threads",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -771,6 +826,7 @@ mod tests {
                 preset.extends.is_none(),
                 "shipped preset `{name}` should not require inheritance"
             );
+            assert!(preset.num_threads.is_some(), "{name}: num_threads");
             assert_complete_canonicalization(name.as_str(), &preset.canonicalization);
             assert_complete_balancing(name.as_str(), &preset.balancing);
             assert_complete_sentencepiece(name.as_str(), &preset.sentencepiece);
@@ -877,7 +933,6 @@ mod tests {
             config.user_defined_symbols.is_some(),
             "{name}: user_defined_symbols"
         );
-        assert!(config.num_threads.is_some(), "{name}: num_threads");
     }
 
     fn assert_complete_validation(name: &str, config: &PartialValidationConfig) {

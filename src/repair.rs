@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use serde::Serialize;
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
@@ -59,6 +59,8 @@ pub enum RepairError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to create repair thread pool: {0}")]
+    ThreadPool(#[from] ThreadPoolBuildError),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,19 +105,14 @@ pub fn repair_corpus(
     paths.create_dirs()?;
     write_effective_config(config, &paths.effective_config)?;
 
+    let pool = repair_thread_pool(config.num_threads)?;
     let output = open_writer(&paths.fixed_corpus)?;
     let issues = open_writer(&paths.issue_log)?;
     let mut writer = RepairWriter::new(output, issues, config, corpus.root.clone(), &paths);
     writer.write_source_issues(&corpus.issues)?;
 
     let stage = progress.stage_bar("fixing corpus", corpus_size_bytes(corpus));
-    for file in &corpus.files {
-        writer.repair_file(file, &stage)?;
-        stage.set_message(format!(
-            "fixing corpus: {} line(s), {} fixed, {} skipped",
-            writer.summary.lines_read, writer.summary.lines_fixed, writer.summary.lines_skipped
-        ));
-    }
+    pool.install(|| repair_files(&mut writer, &corpus.files, &stage))?;
     stage.finish(format!(
         "fixed corpus: {} written, {} fixed, {} skipped",
         writer.summary.lines_written, writer.summary.lines_fixed, writer.summary.lines_skipped
@@ -126,6 +123,27 @@ pub fn repair_corpus(
     summary.fixed_corpus = paths.fixed_corpus;
     summary.issue_log = paths.issue_log;
     Ok(summary)
+}
+
+fn repair_thread_pool(num_threads: u32) -> Result<ThreadPool, ThreadPoolBuildError> {
+    ThreadPoolBuilder::new()
+        .num_threads(num_threads as usize)
+        .build()
+}
+
+fn repair_files(
+    writer: &mut RepairWriter<'_>,
+    files: &[PathBuf],
+    stage: &StageProgress,
+) -> Result<(), RepairError> {
+    for file in files {
+        writer.repair_file(file, stage)?;
+        stage.set_message(format!(
+            "fixing corpus: {} line(s), {} fixed, {} skipped",
+            writer.summary.lines_read, writer.summary.lines_fixed, writer.summary.lines_skipped
+        ));
+    }
+    Ok(())
 }
 
 struct RepairPaths {
@@ -638,6 +656,7 @@ mod tests {
     fn config(work_dir: &Path, corpus_path: &Path) -> EffectiveConfig {
         EffectiveConfig {
             preset: "ocr_multilingual".to_owned(),
+            num_threads: 16,
             corpus: CorpusConfig {
                 path: corpus_path.to_path_buf(),
             },
@@ -695,7 +714,6 @@ mod tests {
                 shuffle_input_sentence: true,
                 train_extremely_large_corpus: true,
                 user_defined_symbols: vec![],
-                num_threads: 16,
             },
             validation: ValidationConfig {
                 mode: ValidationMode::Report,

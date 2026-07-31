@@ -111,9 +111,9 @@ The normal user config should be small:
 }
 ```
 
-The bundled `cfg.json.ocr` file defines named presets. Each shipped preset contains every
-canonicalization, balancing, SentencePiece, and validation parameter directly so users can switch
-behavior by changing only `cfg.json.preset`:
+The bundled `cfg.json.ocr` file defines named presets. Each shipped preset contains the pipeline
+thread count plus every canonicalization, balancing, SentencePiece, and validation parameter
+directly so users can switch behavior by changing only `cfg.json.preset`:
 
 ```json
 {
@@ -122,6 +122,7 @@ behavior by changing only `cfg.json.preset`:
   "presets": {
     "ocr_multilingual": {
       "description": "General multilingual OCR tokenizer preset.",
+      "num_threads": 16,
       "canonicalization": {
         "unicode_form": "nfc"
       },
@@ -139,6 +140,7 @@ behavior by changing only `cfg.json.preset`:
     },
     "ocr_cjk_heavy": {
       "description": "CJK-heavy OCR preset.",
+      "num_threads": 16,
       "canonicalization": {
         "unicode_form": "nfc"
       },
@@ -158,6 +160,7 @@ behavior by changing only `cfg.json.preset`:
     },
     "ocr_math_heavy": {
       "description": "Math/LaTeX-heavy OCR preset.",
+      "num_threads": 16,
       "canonicalization": {
         "unicode_form": "nfc"
       },
@@ -185,6 +188,7 @@ After preset expansion, the effective config contains the full policy:
 
 ```json
 {
+  "num_threads": 16,
   "canonicalization": {
     "unicode_form": "nfc",
     "strip": ["bom", "zero_width_space"],
@@ -228,8 +232,7 @@ After preset expansion, the effective config contains the full policy:
     "input_sentence_size": 20000000,
     "shuffle_input_sentence": true,
     "train_extremely_large_corpus": true,
-    "user_defined_symbols": ["\\frac", "\\sqrt", "\\sum", "\\int", "^", "_", "{", "}"],
-    "num_threads": 16
+    "user_defined_symbols": ["\\frac", "\\sqrt", "\\sum", "\\int", "^", "_", "{", "}"]
   },
   "validation": {
     "mode": "report",
@@ -259,8 +262,9 @@ and skips unreadable sources with a log entry instead of stopping the run.
 
 The program repairs text for OCR tokenizer training: Unicode normalization, OCR-specific
 cleanup, safe whitespace handling, safe chunking for oversized lines, and removal of broken
-lines. Repair work is split into line chunks and processed through a global thread pool, while
-writes stay deterministic. Fixes, chunks, and skipped lines are logged to
+lines. Repair work is split into line chunks and processed through a bounded repair pool that is
+dropped before SentencePiece training starts, while writes stay deterministic. Fixes, chunks, and
+skipped lines are logged to
 `reports/corpus_issues.jsonl`. The original corpus is never modified.
 
 ### 4. Build Training Corpus

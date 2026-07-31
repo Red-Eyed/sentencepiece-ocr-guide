@@ -245,7 +245,7 @@ impl SentencePieceArgs {
             shuffle_input_sentence: sentencepiece.shuffle_input_sentence,
             train_extremely_large_corpus: sentencepiece.train_extremely_large_corpus,
             user_defined_symbols: sentencepiece.user_defined_symbols.clone(),
-            num_threads: sentencepiece.num_threads,
+            num_threads: config.num_threads,
         }
     }
 }
@@ -387,6 +387,7 @@ mod tests {
     fn config(work_dir: &Path) -> EffectiveConfig {
         EffectiveConfig {
             preset: "ocr_multilingual".to_owned(),
+            num_threads: 16,
             corpus: CorpusConfig { path: "raw".into() },
             output: OutputConfig {
                 work_dir: work_dir.to_path_buf(),
@@ -442,7 +443,6 @@ mod tests {
                 shuffle_input_sentence: true,
                 train_extremely_large_corpus: true,
                 user_defined_symbols: vec!["\\frac".to_owned()],
-                num_threads: 16,
             },
             validation: ValidationConfig {
                 mode: ValidationMode::Report,
@@ -472,6 +472,7 @@ mod tests {
         );
         assert_eq!(request.sentencepiece.model_type, "bpe");
         assert_eq!(request.sentencepiece.normalization_rule_name, "identity");
+        assert_eq!(request.sentencepiece.num_threads, 16);
         assert_eq!(
             request.output.model,
             PathBuf::from("runs/demo/ocr_tokenizer.model")

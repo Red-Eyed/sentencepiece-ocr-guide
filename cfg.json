@@ -1,5 +1,6 @@
 {
   "preset": "ocr_multilingual",
+  "num_threads": 16,
   "corpus": {
     "path": "data/raw-corpus"
   },

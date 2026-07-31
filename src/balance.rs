@@ -623,6 +623,7 @@ mod tests {
     fn config(work_dir: &Path, total_lines: u64) -> EffectiveConfig {
         EffectiveConfig {
             preset: "ocr_multilingual".to_owned(),
+            num_threads: 16,
             corpus: CorpusConfig { path: "raw".into() },
             output: OutputConfig {
                 work_dir: work_dir.to_path_buf(),
@@ -678,7 +679,6 @@ mod tests {
                 shuffle_input_sentence: true,
                 train_extremely_large_corpus: true,
                 user_defined_symbols: vec![],
-                num_threads: 16,
             },
             validation: ValidationConfig {
                 mode: ValidationMode::Report,

@@ -33,6 +33,7 @@ Minimal `cfg.json`:
 ```json
 {
   "preset": "ocr_multilingual",
+  "num_threads": 16,
   "corpus": {
     "path": "data/raw-corpus"
   },
@@ -43,11 +44,14 @@ Minimal `cfg.json`:
 }
 ```
 
+`num_threads` applies to both corpus repair and SentencePiece training.
+
 To use a specialized preset, change only the preset name:
 
 ```json
 {
   "preset": "ocr_cjk_heavy",
+  "num_threads": 16,
   "corpus": {
     "path": "data/raw-corpus"
   },
