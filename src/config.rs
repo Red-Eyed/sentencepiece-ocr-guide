@@ -750,4 +750,17 @@ mod tests {
         assert_eq!(effective.sentencepiece.vocab_size, 32_000);
         assert_eq!(effective.sentencepiece.max_sentencepiece_length, 4);
     }
+
+    #[test]
+    fn checked_in_default_config_loads() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        let effective = load_effective_config(&root.join("cfg.json"), &root.join("cfg.json.ocr"))
+            .expect("checked-in cfg.json loads with preset catalog");
+
+        assert_eq!(effective.preset, "ocr_multilingual");
+        assert_eq!(effective.corpus.path, PathBuf::from("data/raw-corpus"));
+        assert_eq!(effective.output.model_prefix, "ocr_tokenizer");
+        assert!(effective.sentencepiece.byte_fallback);
+    }
 }

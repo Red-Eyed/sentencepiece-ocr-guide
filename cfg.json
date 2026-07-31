@@ -1,0 +1,10 @@
+{
+  "preset": "ocr_multilingual",
+  "corpus": {
+    "path": "data/raw-corpus"
+  },
+  "output": {
+    "work_dir": "runs/ocr-spm-v1",
+    "model_prefix": "ocr_tokenizer"
+  }
+}
