@@ -284,7 +284,11 @@ enabled. The raw corpus is never modified.
 ### 4. Balance and assemble
 
 If balancing is enabled, the program classifies canonicalized lines into a domain bucket first
-and a script bucket inside text. It computes target counts using exponential smoothing:
+and then a language/script bucket. For messy real-world corpora, path components are treated as
+weak provenance: ISO-like path tokens such as `en`, `eng`, `es`, `spa`, `ko`, or `kor` are used
+when present, but filenames are not trusted as the only source of truth. If no language hint is
+present, or the hint is not recognized, the bucket falls back to the dominant Unicode script in
+the line itself. It computes target counts using exponential smoothing:
 
 ```text
 P'(bucket) proportional to P(bucket)^alpha

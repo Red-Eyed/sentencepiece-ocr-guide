@@ -11,7 +11,6 @@ use thiserror::Error;
 
 use crate::config::{EffectiveConfig, SentencePieceConfig};
 use crate::progress::ProgressReporter;
-use crate::repair::RepairSummary;
 
 const TRAINER_REQUEST_NAME: &str = "trainer_request.json";
 const TRAINER_OUTPUT_NAME: &str = "trainer_output.json";
@@ -97,13 +96,13 @@ pub enum TrainerError {
 
 pub fn train_sentencepiece(
     config: &EffectiveConfig,
-    repair: &RepairSummary,
+    corpus_path: &Path,
     progress: &ProgressReporter,
 ) -> Result<TrainerOutput, TrainerError> {
     let paths = TrainerPaths::from_config(config);
     paths.create_dirs()?;
 
-    let request = build_trainer_request(config, repair, &paths);
+    let request = build_trainer_request(config, corpus_path, &paths);
     write_json(&paths.request, &request)?;
 
     let stage = progress.stage("training SentencePiece");
@@ -178,11 +177,11 @@ pub fn train_sentencepiece(
 
 pub fn build_trainer_request(
     config: &EffectiveConfig,
-    repair: &RepairSummary,
+    corpus_path: &Path,
     paths: &TrainerPaths,
 ) -> TrainerRequest {
     TrainerRequest {
-        sentencepiece: SentencePieceArgs::from_config(config, repair, paths),
+        sentencepiece: SentencePieceArgs::from_config(config, corpus_path, paths),
         output: TrainerOutputPaths {
             model: paths.model.clone(),
             vocab: paths.vocab.clone(),
@@ -221,10 +220,10 @@ impl TrainerPaths {
 }
 
 impl SentencePieceArgs {
-    fn from_config(config: &EffectiveConfig, repair: &RepairSummary, paths: &TrainerPaths) -> Self {
+    fn from_config(config: &EffectiveConfig, corpus_path: &Path, paths: &TrainerPaths) -> Self {
         let sentencepiece = &config.sentencepiece;
         Self {
-            input: repair.fixed_corpus.clone(),
+            input: corpus_path.to_path_buf(),
             model_prefix: paths.model_prefix.clone(),
             model_type: model_type(sentencepiece),
             vocab_size: sentencepiece.vocab_size,
@@ -443,21 +442,12 @@ mod tests {
     #[test]
     fn builds_replayable_trainer_request() {
         let config = config(Path::new("runs/demo"));
-        let repair = RepairSummary {
-            fixed_corpus: "runs/demo/fixed_corpus.txt".into(),
-            issue_log: "runs/demo/reports/corpus_issues.jsonl".into(),
-            files_read: 2,
-            lines_read: 10,
-            lines_written: 9,
-            lines_fixed: 1,
-            lines_skipped: 1,
-            source_issues: 0,
-        };
         let paths = TrainerPaths::from_config(&config);
 
-        let request = build_trainer_request(&config, &repair, &paths);
+        let corpus_path = PathBuf::from("runs/demo/fixed_corpus.txt");
+        let request = build_trainer_request(&config, &corpus_path, &paths);
 
-        assert_eq!(request.sentencepiece.input, repair.fixed_corpus);
+        assert_eq!(request.sentencepiece.input, corpus_path);
         assert_eq!(
             request.sentencepiece.model_prefix,
             PathBuf::from("runs/demo/ocr_tokenizer")

@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
+use crate::balance::{self, BalanceSummary};
 use crate::config::{self, EffectiveConfig};
 use crate::corpus::{self, DiscoveredCorpus};
 use crate::progress::ProgressReporter;
@@ -44,6 +45,8 @@ struct TrainSummary {
     lines_fixed: u64,
     lines_skipped: u64,
     source_issues: usize,
+    balanced_lines: u64,
+    balance_report: PathBuf,
     model: PathBuf,
     vocab: PathBuf,
     trainer_output: PathBuf,
@@ -71,8 +74,9 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
             repair.issue_log.display()
         );
     }
-    let trainer = train_sentencepiece(&config, &repair, &progress)?;
-    let summary = TrainSummary::from_outputs(&config, &corpus, &repair, &trainer);
+    let balance = balance_corpus(&config, &repair, &progress)?;
+    let trainer = train_sentencepiece(&config, &balance, &progress)?;
+    let summary = TrainSummary::from_outputs(&config, &corpus, &repair, &balance, &trainer);
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -83,10 +87,11 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
             format!(", {} source issue(s) logged", summary.source_issues)
         };
         println!(
-            "Trained: preset `{}`, {} text file(s), {} line(s) written, {} fixed, {} skipped{}, model `{}`",
+            "Trained: preset `{}`, {} text file(s), {} repaired line(s), {} balanced line(s), {} fixed, {} skipped{}, model `{}`",
             summary.preset,
             summary.text_files,
             summary.lines_written,
+            summary.balanced_lines,
             summary.lines_fixed,
             summary.lines_skipped,
             source_issue_suffix,
@@ -127,12 +132,21 @@ fn repair_corpus(
         .with_context(|| format!("could not repair {}", config.corpus.path.display()))
 }
 
-fn train_sentencepiece(
+fn balance_corpus(
     config: &EffectiveConfig,
     repair: &RepairSummary,
     progress: &ProgressReporter,
+) -> Result<BalanceSummary> {
+    balance::balance_corpus(config, repair, progress).context("could not balance corpus")
+}
+
+fn train_sentencepiece(
+    config: &EffectiveConfig,
+    balance: &BalanceSummary,
+    progress: &ProgressReporter,
 ) -> Result<TrainerOutput> {
-    trainer::train_sentencepiece(config, repair, progress).context("could not train SentencePiece")
+    trainer::train_sentencepiece(config, &balance.fixed_corpus, progress)
+        .context("could not train SentencePiece")
 }
 
 impl TrainSummary {
@@ -140,6 +154,7 @@ impl TrainSummary {
         config: &EffectiveConfig,
         corpus: &DiscoveredCorpus,
         repair: &RepairSummary,
+        balance: &BalanceSummary,
         trainer: &TrainerOutput,
     ) -> Self {
         Self {
@@ -153,6 +168,8 @@ impl TrainSummary {
             lines_fixed: repair.lines_fixed,
             lines_skipped: repair.lines_skipped,
             source_issues: repair.source_issues,
+            balanced_lines: balance.output_lines,
+            balance_report: balance.report.clone(),
             model: trainer.model.clone(),
             vocab: trainer.vocab.clone(),
             trainer_output: config.output.work_dir.join("trainer_output.json"),

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::balance::{classify_line, shard_file_name, BucketKey};
 use crate::config::EffectiveConfig;
 use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId, DiscoveredCorpus};
 use crate::normalize::canonicalize_line;
@@ -22,6 +24,14 @@ pub struct RepairSummary {
     pub lines_fixed: u64,
     pub lines_skipped: u64,
     pub source_issues: usize,
+    pub shards: Vec<ShardSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ShardSummary {
+    pub bucket: BucketKey,
+    pub path: PathBuf,
+    pub lines: u64,
 }
 
 #[derive(Debug, Error)]
@@ -118,6 +128,7 @@ struct RepairPaths {
     fixed_corpus: PathBuf,
     issue_log: PathBuf,
     effective_config: PathBuf,
+    shard_dir: PathBuf,
 }
 
 impl RepairPaths {
@@ -125,18 +136,24 @@ impl RepairPaths {
         let fixed_corpus = config.output.work_dir.join(FIXED_CORPUS_NAME);
         let issue_log = resolve_output_path(&config.output.work_dir, &config.validation.issue_log);
         let effective_config = config.output.work_dir.join("effective_config.json");
+        let shard_dir = config.output.work_dir.join("shards");
 
         Self {
             fixed_corpus,
             issue_log,
             effective_config,
+            shard_dir,
         }
     }
 
     fn create_dirs(&self) -> Result<(), RepairError> {
         create_parent_dir(&self.fixed_corpus)?;
         create_parent_dir(&self.issue_log)?;
-        create_parent_dir(&self.effective_config)
+        create_parent_dir(&self.effective_config)?;
+        fs::create_dir_all(&self.shard_dir).map_err(|source| RepairError::CreateDir {
+            path: self.shard_dir.clone(),
+            source,
+        })
     }
 }
 
@@ -145,6 +162,8 @@ struct RepairWriter<'a> {
     issues: BufWriter<File>,
     config: &'a EffectiveConfig,
     summary: RepairSummary,
+    shard_dir: PathBuf,
+    shard_writers: HashMap<BucketKey, BufWriter<File>>,
 }
 
 impl<'a> RepairWriter<'a> {
@@ -167,7 +186,10 @@ impl<'a> RepairWriter<'a> {
                 lines_fixed: 0,
                 lines_skipped: 0,
                 source_issues: 0,
+                shards: Vec::new(),
             },
+            shard_dir: paths.shard_dir.clone(),
+            shard_writers: HashMap::new(),
         }
     }
 
@@ -273,7 +295,7 @@ impl<'a> RepairWriter<'a> {
             )?;
         }
 
-        self.write_line(&canonicalized.text)
+        self.write_line(path, &canonicalized.text)
     }
 
     fn fix(
@@ -313,7 +335,7 @@ impl<'a> RepairWriter<'a> {
         })
     }
 
-    fn write_line(&mut self, line: &str) -> Result<(), RepairError> {
+    fn write_line(&mut self, source_path: &Path, line: &str) -> Result<(), RepairError> {
         self.output
             .write_all(line.as_bytes())
             .and_then(|_| self.output.write_all(b"\n"))
@@ -322,6 +344,41 @@ impl<'a> RepairWriter<'a> {
                 source,
             })?;
         self.summary.lines_written += 1;
+        self.write_shard_line(source_path, line)
+    }
+
+    fn write_shard_line(&mut self, source_path: &Path, line: &str) -> Result<(), RepairError> {
+        let bucket = classify_line(source_path, line);
+        let shard_path = self.shard_dir.join(shard_file_name(&bucket));
+        if !self.shard_writers.contains_key(&bucket) {
+            let writer = open_writer(&shard_path)?;
+            self.shard_writers.insert(bucket.clone(), writer);
+            self.summary.shards.push(ShardSummary {
+                bucket: bucket.clone(),
+                path: shard_path,
+                lines: 0,
+            });
+        }
+
+        let writer = self
+            .shard_writers
+            .get_mut(&bucket)
+            .expect("shard writer was inserted");
+        writer
+            .write_all(line.as_bytes())
+            .and_then(|_| writer.write_all(b"\n"))
+            .map_err(|source| RepairError::Write {
+                path: self.shard_dir.join(shard_file_name(&bucket)),
+                source,
+            })?;
+
+        let shard = self
+            .summary
+            .shards
+            .iter_mut()
+            .find(|shard| shard.bucket == bucket)
+            .expect("shard summary was inserted");
+        shard.lines += 1;
         Ok(())
     }
 
@@ -347,6 +404,15 @@ impl<'a> RepairWriter<'a> {
             path: self.summary.issue_log.clone(),
             source,
         })?;
+        for (bucket, mut writer) in self.shard_writers {
+            writer.flush().map_err(|source| RepairError::Write {
+                path: self.shard_dir.join(shard_file_name(&bucket)),
+                source,
+            })?;
+        }
+        self.summary
+            .shards
+            .sort_by(|left, right| left.bucket.cmp(&right.bucket));
         Ok(self.summary)
     }
 }
