@@ -15,9 +15,14 @@
       },
       "balancing": {
         "enabled": true,
+        "mode": "conservative",
         "total_lines": 20000000,
-        "alpha": 0.3,
-        "hierarchy": ["domain", "script"],
+        "alpha": 0.7,
+        "hierarchy": ["domain", "script", "language_hint", "source_group", "length_bin"],
+        "min_keep_fraction": 0.5,
+        "max_downsample_ratio": 4.0,
+        "collapse_buckets_below_lines": 1000,
+        "max_part_lines": 1000000,
         "shuffle_seed": 1337
       },
       "sentencepiece": {

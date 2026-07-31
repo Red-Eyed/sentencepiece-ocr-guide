@@ -19,11 +19,12 @@ def main() -> int:
 
     request_path = Path(sys.argv[1])
     request = _read_request(request_path)
+    sentencepiece_args = _sentencepiece_args(request)
     output_path = Path(request["output"]["trainer_output"])
     started = time.monotonic()
 
     try:
-        spm.SentencePieceTrainer.train(**request["sentencepiece"])
+        spm.SentencePieceTrainer.train(**sentencepiece_args)
     except Exception as error:
         _write_output(
             output_path,
@@ -52,6 +53,14 @@ def main() -> int:
 def _read_request(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as file:
         return json.load(file)
+
+
+def _sentencepiece_args(request: dict[str, Any]) -> dict[str, Any]:
+    args = dict(request["sentencepiece"])
+    inputs = args.get("input")
+    if isinstance(inputs, list):
+        args["input"] = ",".join(str(path) for path in inputs)
+    return args
 
 
 def _write_output(path: Path, payload: dict[str, Any]) -> None:

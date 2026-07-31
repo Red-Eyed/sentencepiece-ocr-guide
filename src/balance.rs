@@ -16,7 +16,7 @@ use crate::repair::{RepairSummary, ShardSummary};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BalanceSummary {
-    pub fixed_corpus: PathBuf,
+    pub training_files: Vec<PathBuf>,
     pub report: PathBuf,
     pub input_lines: u64,
     pub output_lines: u64,
@@ -29,12 +29,16 @@ pub struct BucketBalance {
     pub input_lines: u64,
     pub target_lines: u64,
     pub output_lines: u64,
+    pub training_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BucketKey {
     pub domain: Domain,
-    pub label: String,
+    pub script: String,
+    pub language_hint: String,
+    pub source_group: String,
+    pub length_bin: LengthBin,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -42,6 +46,14 @@ pub struct BucketKey {
 pub enum Domain {
     Text,
     Math,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LengthBin {
+    Short,
+    Normal,
+    Long,
 }
 
 #[derive(Debug, Error)]
@@ -70,13 +82,21 @@ pub enum BalanceError {
 
 pub fn classify_line(path: &Path, text: &str) -> BucketKey {
     let domain = classify_domain(text);
-    let label = language_hint(path).unwrap_or_else(|| format!("script:{}", dominant_script(text)));
-    BucketKey { domain, label }
+    let script = dominant_script(text);
+    let language_hint = language_hint(path).unwrap_or_else(|| "unknown".to_owned());
+    let source_group = source_group(path);
+    let length_bin = length_bin(text);
+    BucketKey {
+        domain,
+        script,
+        language_hint,
+        source_group,
+        length_bin,
+    }
 }
 
 pub fn shard_file_name(bucket: &BucketKey) -> String {
-    let serialized = serde_json::to_vec(bucket).expect("bucket key is serializable");
-    blake3::hash(&serialized).to_hex().to_string()
+    format!("{}.txt", bucket_stem(bucket, NameFlavor::Shard, 0))
 }
 
 pub fn balance_corpus(
@@ -91,21 +111,14 @@ pub fn balance_corpus(
     let summary = if config.balancing.enabled {
         assemble_balanced(config, repair, &paths)?
     } else {
+        let buckets = copy_shards_to_training_parts(config, repair, &paths)?;
+        let training_files = collect_training_files(&buckets);
         write_report(
-            repair.fixed_corpus.clone(),
+            training_files,
             paths.report.clone(),
             repair.lines_written,
             repair.lines_written,
-            repair
-                .shards
-                .iter()
-                .map(|shard| BucketBalance {
-                    bucket: shard.bucket.clone(),
-                    input_lines: shard.lines,
-                    target_lines: shard.lines,
-                    output_lines: shard.lines,
-                })
-                .collect(),
+            buckets,
         )?
     };
 
@@ -122,35 +135,55 @@ fn assemble_balanced(
     paths: &BalancePaths,
 ) -> Result<BalanceSummary, BalanceError> {
     let targets = compute_targets(config, repair);
-    let mut selected = Vec::new();
     let mut buckets = Vec::new();
 
     for shard in &repair.shards {
-        let target = targets.get(&shard.bucket).copied().unwrap_or(0);
+        let Some(target) = targets.get(&shard.bucket).copied() else {
+            continue;
+        };
         let lines = sample_shard(shard, target, config.balancing.shuffle_seed)?;
-        let output_lines = lines.len() as u64;
-        selected.extend(lines);
+        let training_files = write_training_parts(config, paths, &shard.bucket, lines)?;
+        let output_lines = count_lines_in_files(&training_files)?;
         buckets.push(BucketBalance {
             bucket: shard.bucket.clone(),
             input_lines: shard.lines,
             target_lines: target,
             output_lines,
+            training_files,
         });
     }
 
-    let mut rng = ChaCha20Rng::seed_from_u64(config.balancing.shuffle_seed);
-    selected.shuffle(&mut rng);
-    write_lines(&paths.fixed_corpus, &selected)?;
-
     let input_lines = repair.lines_written;
-    let output_lines = selected.len() as u64;
+    let output_lines = buckets.iter().map(|bucket| bucket.output_lines).sum();
+    let training_files = collect_training_files(&buckets);
     write_report(
-        paths.fixed_corpus.clone(),
+        training_files,
         paths.report.clone(),
         input_lines,
         output_lines,
         buckets,
     )
+}
+
+fn copy_shards_to_training_parts(
+    config: &EffectiveConfig,
+    repair: &RepairSummary,
+    paths: &BalancePaths,
+) -> Result<Vec<BucketBalance>, BalanceError> {
+    let mut buckets = Vec::new();
+    for shard in &repair.shards {
+        let lines = sample_shard(shard, shard.lines, config.balancing.shuffle_seed)?;
+        let output_lines = lines.len() as u64;
+        let training_files = write_training_parts(config, paths, &shard.bucket, lines)?;
+        buckets.push(BucketBalance {
+            bucket: shard.bucket.clone(),
+            input_lines: shard.lines,
+            target_lines: shard.lines,
+            output_lines,
+            training_files,
+        });
+    }
+    Ok(buckets)
 }
 
 fn compute_targets(config: &EffectiveConfig, repair: &RepairSummary) -> HashMap<BucketKey, u64> {
@@ -172,6 +205,12 @@ fn compute_targets(config: &EffectiveConfig, repair: &RepairSummary) -> HashMap<
         .collect::<Vec<_>>();
     let weight_sum = weights.iter().map(|(_, weight)| weight).sum::<f64>();
 
+    let floors = repair
+        .shards
+        .iter()
+        .map(|shard| (shard.bucket.clone(), conservative_floor(config, shard)))
+        .collect::<HashMap<_, _>>();
+
     let mut targets = weights
         .into_iter()
         .map(|(bucket, weight)| {
@@ -181,16 +220,32 @@ fn compute_targets(config: &EffectiveConfig, repair: &RepairSummary) -> HashMap<
                 .find(|shard| shard.bucket == bucket)
                 .map(|shard| shard.lines)
                 .unwrap_or(0);
+            let floor = floors.get(&bucket).copied().unwrap_or(1);
             let target = ((weight / weight_sum) * requested_total as f64).round() as u64;
-            (bucket, target.clamp(1, input_lines))
+            (bucket, target.clamp(floor, input_lines))
         })
         .collect::<HashMap<_, _>>();
-    rebalance_target_sum(&mut targets, repair, requested_total);
+    rebalance_target_sum(&mut targets, &floors, repair, requested_total);
     targets
+}
+
+fn conservative_floor(config: &EffectiveConfig, shard: &ShardSummary) -> u64 {
+    if shard.lines == 0 {
+        return 0;
+    }
+
+    if shard.lines < config.balancing.collapse_buckets_below_lines {
+        return shard.lines;
+    }
+
+    let by_fraction = (shard.lines as f64 * config.balancing.min_keep_fraction).ceil() as u64;
+    let by_ratio = (shard.lines as f64 / config.balancing.max_downsample_ratio).ceil() as u64;
+    by_fraction.max(by_ratio).clamp(1, shard.lines)
 }
 
 fn rebalance_target_sum(
     targets: &mut HashMap<BucketKey, u64>,
+    floors: &HashMap<BucketKey, u64>,
     repair: &RepairSummary,
     requested_total: u64,
 ) {
@@ -209,7 +264,7 @@ fn rebalance_target_sum(
     while targets.values().sum::<u64>() > requested_total {
         let Some(bucket) = targets
             .iter()
-            .filter(|(_, target)| **target > 1)
+            .filter(|(bucket, target)| **target > floors.get(*bucket).copied().unwrap_or(1))
             .max_by_key(|(_, target)| **target)
             .map(|(bucket, _)| bucket.clone())
         else {
@@ -262,7 +317,7 @@ fn sample_shard(shard: &ShardSummary, target: u64, seed: u64) -> Result<Vec<Stri
 }
 
 fn write_report(
-    fixed_corpus: PathBuf,
+    training_files: Vec<PathBuf>,
     report: PathBuf,
     input_lines: u64,
     output_lines: u64,
@@ -270,7 +325,7 @@ fn write_report(
 ) -> Result<BalanceSummary, BalanceError> {
     buckets.sort_by(|left, right| left.bucket.cmp(&right.bucket));
     let summary = BalanceSummary {
-        fixed_corpus,
+        training_files,
         report,
         input_lines,
         output_lines,
@@ -280,7 +335,63 @@ fn write_report(
     Ok(summary)
 }
 
+fn collect_training_files(buckets: &[BucketBalance]) -> Vec<PathBuf> {
+    let mut files = buckets
+        .iter()
+        .flat_map(|bucket| bucket.training_files.iter().cloned())
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+fn write_training_parts(
+    config: &EffectiveConfig,
+    paths: &BalancePaths,
+    bucket: &BucketKey,
+    mut lines: Vec<String>,
+) -> Result<Vec<PathBuf>, BalanceError> {
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut rng = ChaCha20Rng::seed_from_u64(config.balancing.shuffle_seed ^ bucket_seed(bucket));
+    lines.shuffle(&mut rng);
+
+    let max_part_lines = config.balancing.max_part_lines.max(1) as usize;
+    let mut files = Vec::new();
+    for (part_index, part_lines) in lines.chunks(max_part_lines).enumerate() {
+        let file_name = format!(
+            "{}.txt",
+            bucket_stem(bucket, NameFlavor::TrainingPart, part_index)
+        );
+        let path = paths.train_corpus_dir.join(file_name);
+        write_lines(&path, part_lines)?;
+        files.push(path);
+    }
+    Ok(files)
+}
+
+fn count_lines_in_files(paths: &[PathBuf]) -> Result<u64, BalanceError> {
+    paths.iter().try_fold(0, |total, path| {
+        let file = File::open(path).map_err(|source| BalanceError::Open {
+            path: path.clone(),
+            source,
+        })?;
+        let reader = BufReader::new(file);
+        let mut count = 0;
+        for line in reader.lines() {
+            line.map_err(|source| BalanceError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            count += 1;
+        }
+        Ok(total + count)
+    })
+}
+
 fn write_lines(path: &Path, lines: &[String]) -> Result<(), BalanceError> {
+    create_parent_dir(path)?;
     let file = File::create(path).map_err(|source| BalanceError::Write {
         path: path.to_path_buf(),
         source,
@@ -352,7 +463,22 @@ fn language_hint(path: &Path) -> Option<String> {
     path.components()
         .flat_map(|component| split_path_tokens(&component.as_os_str().to_string_lossy()))
         .find(|token| is_language_token(token))
-        .map(|token| format!("lang:{token}"))
+}
+
+fn source_group(path: &Path) -> String {
+    path.components()
+        .flat_map(|component| split_path_tokens(&component.as_os_str().to_string_lossy()))
+        .find(|token| !is_language_token(token) && token.len() >= 3)
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn length_bin(text: &str) -> LengthBin {
+    let chars = text.chars().count();
+    match chars {
+        0..=40 => LengthBin::Short,
+        41..=240 => LengthBin::Normal,
+        _ => LengthBin::Long,
+    }
 }
 
 fn split_path_tokens(value: &str) -> Vec<String> {
@@ -373,21 +499,77 @@ fn bucket_seed(bucket: &BucketKey) -> u64 {
     u64::from_le_bytes(hash.as_bytes()[0..8].try_into().expect("hash has 32 bytes"))
 }
 
+enum NameFlavor {
+    Shard,
+    TrainingPart,
+}
+
+fn bucket_stem(bucket: &BucketKey, flavor: NameFlavor, part_index: usize) -> String {
+    let serialized = serde_json::to_vec(bucket).expect("bucket key is serializable");
+    let digest = &blake3::hash(&serialized).to_hex().to_string()[..8];
+    let prefix = match flavor {
+        NameFlavor::Shard => "shard",
+        NameFlavor::TrainingPart => "train",
+    };
+    let domain = match bucket.domain {
+        Domain::Text => "text",
+        Domain::Math => "math",
+    };
+    let length = match bucket.length_bin {
+        LengthBin::Short => "short",
+        LengthBin::Normal => "normal",
+        LengthBin::Long => "long",
+    };
+
+    format!(
+        "{prefix}-{domain}-script_{}-lang_{}-source_{}-len_{length}-part_{:04}-{digest}",
+        slug(&bucket.script),
+        slug(&bucket.language_hint),
+        slug(&bucket.source_group),
+        part_index + 1,
+    )
+}
+
+fn slug(value: &str) -> String {
+    let mut slug = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while slug.contains("__") {
+        slug = slug.replace("__", "_");
+    }
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() {
+        "unknown".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
 struct BalancePaths {
-    fixed_corpus: PathBuf,
+    train_corpus_dir: PathBuf,
     report: PathBuf,
 }
 
 impl BalancePaths {
     fn from_config(config: &EffectiveConfig) -> Self {
         Self {
-            fixed_corpus: config.output.work_dir.join("fixed_corpus.txt"),
+            train_corpus_dir: config.output.work_dir.join("train_corpus"),
             report: config.output.work_dir.join("reports/balance.json"),
         }
     }
 
     fn create_dirs(&self) -> Result<(), BalanceError> {
-        create_parent_dir(&self.fixed_corpus)?;
+        fs::create_dir_all(&self.train_corpus_dir).map_err(|source| BalanceError::CreateDir {
+            path: self.train_corpus_dir.clone(),
+            source,
+        })?;
         create_parent_dir(&self.report)
     }
 }
@@ -429,10 +611,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::config::{
-        BalanceAxis, BalancingConfig, CanonicalizationConfig, CorpusConfig, EffectiveConfig,
-        LinePolicy, ModelType, NormalizationRuleName, OutputConfig, PythonTrainerConfig,
-        SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind, UnicodeForm,
-        ValidationConfig, ValidationMode,
+        BalanceAxis, BalancingConfig, BalancingMode, CanonicalizationConfig, CorpusConfig,
+        EffectiveConfig, LinePolicy, ModelType, NormalizationRuleName, OutputConfig,
+        PythonTrainerConfig, SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind,
+        UnicodeForm, ValidationConfig, ValidationMode,
     };
     use crate::progress::ProgressReporter;
 
@@ -457,9 +639,20 @@ mod tests {
             },
             balancing: BalancingConfig {
                 enabled: true,
+                mode: BalancingMode::Conservative,
                 total_lines,
-                alpha: 0.3,
-                hierarchy: vec![BalanceAxis::Domain, BalanceAxis::Script],
+                alpha: 0.7,
+                hierarchy: vec![
+                    BalanceAxis::Domain,
+                    BalanceAxis::Script,
+                    BalanceAxis::LanguageHint,
+                    BalanceAxis::SourceGroup,
+                    BalanceAxis::LengthBin,
+                ],
+                min_keep_fraction: 0.5,
+                max_downsample_ratio: 4.0,
+                collapse_buckets_below_lines: 0,
+                max_part_lines: 1_000_000,
                 shuffle_seed: 7,
             },
             sentencepiece: SentencePieceConfig {
@@ -501,14 +694,15 @@ mod tests {
     fn path_language_hint_wins_when_present() {
         let bucket = classify_line(Path::new("vendor/es/books/file"), "hello");
 
-        assert_eq!(bucket.label, "lang:es");
+        assert_eq!(bucket.language_hint, "es");
     }
 
     #[test]
     fn falls_back_to_dominant_script() {
         let bucket = classify_line(Path::new("vendor/books/file"), "Привет мир");
 
-        assert_eq!(bucket.label, "script:cyrillic");
+        assert_eq!(bucket.script, "cyrillic");
+        assert_eq!(bucket.language_hint, "unknown");
     }
 
     #[test]
@@ -532,7 +726,10 @@ mod tests {
                 ShardSummary {
                     bucket: BucketKey {
                         domain: Domain::Text,
-                        label: "script:latin".to_owned(),
+                        script: "latin".to_owned(),
+                        language_hint: "unknown".to_owned(),
+                        source_group: "latin".to_owned(),
+                        length_bin: LengthBin::Short,
                     },
                     path: latin,
                     lines: 6,
@@ -540,7 +737,10 @@ mod tests {
                 ShardSummary {
                     bucket: BucketKey {
                         domain: Domain::Text,
-                        label: "script:cyrillic".to_owned(),
+                        script: "cyrillic".to_owned(),
+                        language_hint: "unknown".to_owned(),
+                        source_group: "cyrillic".to_owned(),
+                        length_bin: LengthBin::Short,
                     },
                     path: cyrillic,
                     lines: 1,
@@ -553,12 +753,19 @@ mod tests {
 
         assert_eq!(summary.output_lines, 6);
         assert_eq!(
-            fs::read_to_string(temp.path().join("fixed_corpus.txt"))
-                .expect("read balanced")
-                .lines()
-                .count(),
+            summary
+                .training_files
+                .iter()
+                .map(|path| fs::read_to_string(path)
+                    .expect("read balanced")
+                    .lines()
+                    .count())
+                .sum::<usize>(),
             6
         );
+        assert!(summary.training_files.iter().all(|path| path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("train-text-script_"))));
         assert!(temp.path().join("reports/balance.json").exists());
     }
 }

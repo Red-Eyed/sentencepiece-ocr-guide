@@ -159,9 +159,14 @@ After preset expansion, the effective config contains the full policy:
   },
   "balancing": {
     "enabled": true,
+    "mode": "conservative",
     "total_lines": 20000000,
-    "alpha": 0.3,
-    "hierarchy": ["domain", "script"],
+    "alpha": 0.7,
+    "hierarchy": ["domain", "script", "language_hint", "source_group", "length_bin"],
+    "min_keep_fraction": 0.5,
+    "max_downsample_ratio": 4.0,
+    "collapse_buckets_below_lines": 1000,
+    "max_part_lines": 1000000,
     "shuffle_seed": 1337
   },
   "sentencepiece": {
@@ -278,25 +283,27 @@ Examples of skipped lines:
 - line exceeds the configured `max_sentence_length` and cannot be chunked safely;
 - empty or whitespace-only line, if the preset disables whitespace-only examples.
 
-The output is written to `work_dir/fixed_corpus.txt` or to per-bucket shards when balancing is
-enabled. The raw corpus is never modified.
+The repaired audit stream is written to `work_dir/fixed_corpus.txt`; training inputs are
+written as named corpus parts under `work_dir/train_corpus/`. The raw corpus is never
+modified.
 
 ### 4. Balance and assemble
 
-If balancing is enabled, the program classifies canonicalized lines into a domain bucket first
-and then a language/script bucket. For messy real-world corpora, path components are treated as
-weak provenance: ISO-like path tokens such as `en`, `eng`, `es`, `spa`, `ko`, or `kor` are used
-when present, but filenames are not trusted as the only source of truth. If no language hint is
-present, or the hint is not recognized, the bucket falls back to the dominant Unicode script in
-the line itself. It computes target counts using exponential smoothing:
+If balancing is enabled, the program classifies canonicalized lines by multiple weak signals:
+domain, dominant Unicode script, ISO-like language hints in paths such as `en`, `eng`, `es`,
+`spa`, `ko`, or `kor`, source group, and line-length bin. Paths are treated as provenance, not
+truth: the script is discovered from text content, and path language hints only become one
+bucket feature among several. It computes target counts using exponential smoothing:
 
 ```text
 P'(bucket) proportional to P(bucket)^alpha
 ```
 
 Small buckets are fully retained. Large buckets are downsampled with a seeded streaming
-reservoir. The assembled corpus is shuffled with the configured seed so adjacent categories
-interleave.
+reservoir, bounded by `min_keep_fraction` and `max_downsample_ratio` so balancing remains
+conservative. The assembled training corpus is split into named part files such as
+`train-text-script_latin-lang_es-source_books-len_normal-part_0001-a1b2c3d4.txt`, so operators
+can inspect what each file means without decoding numeric ids.
 
 The output report includes actual versus target counts. If the final distribution misses
 targets beyond configured tolerance, training stops.
@@ -360,7 +367,7 @@ Findings are emitted as structured records:
   "id": "non_nfc_vocabulary",
   "severity": "warning",
   "action": "reported",
-  "remedy": "retrain_from_fixed_corpus",
+  "remedy": "retrain_from_training_corpus",
   "message": "3 vocabulary pieces are not NFC",
   "examples": ["café"]
 }
@@ -398,7 +405,7 @@ ConfigLoader -> PresetResolver -> PolicyValidator -> EffectiveConfig
 CorpusWalker -> AxisScanner -> RawScanReport
   |
   v
-Canonicalizer -> BucketClassifier -> Balancer -> fixed_corpus.txt
+Canonicalizer -> BucketClassifier -> Balancer -> train_corpus/*.txt
   |
   v
 Trainer adapter -> Python bridge -> ocr_tokenizer.model + ocr_tokenizer.vocab
@@ -521,6 +528,9 @@ always written under `work_dir/reports/`.
 ```text
 runs/ocr-spm-v1/
   fixed_corpus.txt
+  train_corpus/
+    train-text-script_latin-lang_es-source_books-len_normal-part_0001-a1b2c3d4.txt
+    train-text-script_hangul-lang_ko-source_scans-len_short-part_0001-b2c3d4e5.txt
   effective_config.json
   ocr_tokenizer.model
   ocr_tokenizer.vocab

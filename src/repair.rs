@@ -101,7 +101,7 @@ pub fn repair_corpus(
 
     let output = open_writer(&paths.fixed_corpus)?;
     let issues = open_writer(&paths.issue_log)?;
-    let mut writer = RepairWriter::new(output, issues, config, &paths);
+    let mut writer = RepairWriter::new(output, issues, config, corpus.root.clone(), &paths);
     writer.write_source_issues(&corpus.issues)?;
 
     let stage = progress.stage("fixing corpus");
@@ -161,6 +161,7 @@ struct RepairWriter<'a> {
     output: BufWriter<File>,
     issues: BufWriter<File>,
     config: &'a EffectiveConfig,
+    corpus_root: PathBuf,
     summary: RepairSummary,
     shard_dir: PathBuf,
     shard_writers: HashMap<BucketKey, BufWriter<File>>,
@@ -171,12 +172,14 @@ impl<'a> RepairWriter<'a> {
         output: BufWriter<File>,
         issues: BufWriter<File>,
         config: &'a EffectiveConfig,
+        corpus_root: PathBuf,
         paths: &RepairPaths,
     ) -> Self {
         Self {
             output,
             issues,
             config,
+            corpus_root,
             summary: RepairSummary {
                 fixed_corpus: paths.fixed_corpus.clone(),
                 issue_log: paths.issue_log.clone(),
@@ -348,7 +351,7 @@ impl<'a> RepairWriter<'a> {
     }
 
     fn write_shard_line(&mut self, source_path: &Path, line: &str) -> Result<(), RepairError> {
-        let bucket = classify_line(source_path, line);
+        let bucket = classify_line(&classification_path(&self.corpus_root, source_path), line);
         let shard_path = self.shard_dir.join(shard_file_name(&bucket));
         if !self.shard_writers.contains_key(&bucket) {
             let writer = open_writer(&shard_path)?;
@@ -445,6 +448,16 @@ fn resolve_output_path(work_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn classification_path(corpus_root: &Path, source_path: &Path) -> PathBuf {
+    match source_path.strip_prefix(corpus_root) {
+        Ok(relative) if !relative.as_os_str().is_empty() => relative.to_path_buf(),
+        _ => source_path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| source_path.to_path_buf()),
+    }
+}
+
 fn create_parent_dir(path: &Path) -> Result<(), RepairError> {
     let Some(parent) = path.parent() else {
         return Ok(());
@@ -484,10 +497,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::config::{
-        BalanceAxis, BalancingConfig, CanonicalizationConfig, CorpusConfig, EffectiveConfig,
-        LinePolicy, ModelType, NormalizationRuleName, OutputConfig, PythonTrainerConfig,
-        SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind, UnicodeForm,
-        ValidationConfig, ValidationMode,
+        BalanceAxis, BalancingConfig, BalancingMode, CanonicalizationConfig, CorpusConfig,
+        EffectiveConfig, LinePolicy, ModelType, NormalizationRuleName, OutputConfig,
+        PythonTrainerConfig, SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind,
+        UnicodeForm, ValidationConfig, ValidationMode,
     };
     use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId};
 
@@ -514,9 +527,20 @@ mod tests {
             },
             balancing: BalancingConfig {
                 enabled: true,
+                mode: BalancingMode::Conservative,
                 total_lines: 20_000_000,
-                alpha: 0.3,
-                hierarchy: vec![BalanceAxis::Domain, BalanceAxis::Script],
+                alpha: 0.7,
+                hierarchy: vec![
+                    BalanceAxis::Domain,
+                    BalanceAxis::Script,
+                    BalanceAxis::LanguageHint,
+                    BalanceAxis::SourceGroup,
+                    BalanceAxis::LengthBin,
+                ],
+                min_keep_fraction: 0.5,
+                max_downsample_ratio: 4.0,
+                collapse_buckets_below_lines: 1000,
+                max_part_lines: 1_000_000,
                 shuffle_seed: 1337,
             },
             sentencepiece: SentencePieceConfig {
@@ -638,5 +662,16 @@ mod tests {
             fs::read_to_string(output.join("reports/corpus_issues.jsonl")).expect("read issue log");
         assert!(issue_log.contains("\"id\":\"unsupported_file\""));
         assert!(issue_log.contains("\"action\":\"skipped\""));
+    }
+
+    #[test]
+    fn classification_path_uses_corpus_relative_source() {
+        let root = Path::new("/corpus/vendor/es");
+        let source = Path::new("/corpus/vendor/es/books/page.txt");
+
+        assert_eq!(
+            classification_path(root, source),
+            PathBuf::from("books/page.txt")
+        );
     }
 }

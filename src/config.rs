@@ -146,9 +146,14 @@ pub enum SoftHyphenPolicy {
 #[serde(deny_unknown_fields)]
 pub struct BalancingConfig {
     pub enabled: bool,
+    pub mode: BalancingMode,
     pub total_lines: u64,
     pub alpha: f64,
     pub hierarchy: Vec<BalanceAxis>,
+    pub min_keep_fraction: f64,
+    pub max_downsample_ratio: f64,
+    pub collapse_buckets_below_lines: u64,
+    pub max_part_lines: u64,
     pub shuffle_seed: u64,
 }
 
@@ -158,13 +163,29 @@ pub struct PartialBalancingConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
+    pub mode: Option<BalancingMode>,
+    #[serde(default)]
     pub total_lines: Option<u64>,
     #[serde(default)]
     pub alpha: Option<f64>,
     #[serde(default)]
     pub hierarchy: Option<Vec<BalanceAxis>>,
     #[serde(default)]
+    pub min_keep_fraction: Option<f64>,
+    #[serde(default)]
+    pub max_downsample_ratio: Option<f64>,
+    #[serde(default)]
+    pub collapse_buckets_below_lines: Option<u64>,
+    #[serde(default)]
+    pub max_part_lines: Option<u64>,
+    #[serde(default)]
     pub shuffle_seed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BalancingMode {
+    Conservative,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +193,9 @@ pub struct PartialBalancingConfig {
 pub enum BalanceAxis {
     Domain,
     Script,
+    LanguageHint,
+    SourceGroup,
+    LengthBin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -456,18 +480,40 @@ impl PartialCanonicalizationConfig {
 impl PartialBalancingConfig {
     fn merge(&mut self, other: &Self) {
         replace_if_some(&mut self.enabled, other.enabled);
+        replace_if_some(&mut self.mode, other.mode);
         replace_if_some(&mut self.total_lines, other.total_lines);
         replace_if_some(&mut self.alpha, other.alpha);
         replace_if_some(&mut self.hierarchy, other.hierarchy.clone());
+        replace_if_some(&mut self.min_keep_fraction, other.min_keep_fraction);
+        replace_if_some(&mut self.max_downsample_ratio, other.max_downsample_ratio);
+        replace_if_some(
+            &mut self.collapse_buckets_below_lines,
+            other.collapse_buckets_below_lines,
+        );
+        replace_if_some(&mut self.max_part_lines, other.max_part_lines);
         replace_if_some(&mut self.shuffle_seed, other.shuffle_seed);
     }
 
     fn require(self) -> Result<BalancingConfig, ConfigError> {
         Ok(BalancingConfig {
             enabled: require_field(self.enabled, "balancing.enabled")?,
+            mode: require_field(self.mode, "balancing.mode")?,
             total_lines: require_field(self.total_lines, "balancing.total_lines")?,
             alpha: require_field(self.alpha, "balancing.alpha")?,
             hierarchy: require_field(self.hierarchy, "balancing.hierarchy")?,
+            min_keep_fraction: require_field(
+                self.min_keep_fraction,
+                "balancing.min_keep_fraction",
+            )?,
+            max_downsample_ratio: require_field(
+                self.max_downsample_ratio,
+                "balancing.max_downsample_ratio",
+            )?,
+            collapse_buckets_below_lines: require_field(
+                self.collapse_buckets_below_lines,
+                "balancing.collapse_buckets_below_lines",
+            )?,
+            max_part_lines: require_field(self.max_part_lines, "balancing.max_part_lines")?,
             shuffle_seed: require_field(self.shuffle_seed, "balancing.shuffle_seed")?,
         })
     }

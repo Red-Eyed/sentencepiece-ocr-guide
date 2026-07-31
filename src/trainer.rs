@@ -23,7 +23,7 @@ pub struct TrainerRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SentencePieceArgs {
-    pub input: PathBuf,
+    pub input: Vec<PathBuf>,
     pub model_prefix: PathBuf,
     pub model_type: String,
     pub vocab_size: u32,
@@ -96,13 +96,13 @@ pub enum TrainerError {
 
 pub fn train_sentencepiece(
     config: &EffectiveConfig,
-    corpus_path: &Path,
+    corpus_paths: &[PathBuf],
     progress: &ProgressReporter,
 ) -> Result<TrainerOutput, TrainerError> {
     let paths = TrainerPaths::from_config(config);
     paths.create_dirs()?;
 
-    let request = build_trainer_request(config, corpus_path, &paths);
+    let request = build_trainer_request(config, corpus_paths, &paths);
     write_json(&paths.request, &request)?;
 
     let stage = progress.stage("training SentencePiece");
@@ -177,11 +177,11 @@ pub fn train_sentencepiece(
 
 pub fn build_trainer_request(
     config: &EffectiveConfig,
-    corpus_path: &Path,
+    corpus_paths: &[PathBuf],
     paths: &TrainerPaths,
 ) -> TrainerRequest {
     TrainerRequest {
-        sentencepiece: SentencePieceArgs::from_config(config, corpus_path, paths),
+        sentencepiece: SentencePieceArgs::from_config(config, corpus_paths, paths),
         output: TrainerOutputPaths {
             model: paths.model.clone(),
             vocab: paths.vocab.clone(),
@@ -220,10 +220,14 @@ impl TrainerPaths {
 }
 
 impl SentencePieceArgs {
-    fn from_config(config: &EffectiveConfig, corpus_path: &Path, paths: &TrainerPaths) -> Self {
+    fn from_config(
+        config: &EffectiveConfig,
+        corpus_paths: &[PathBuf],
+        paths: &TrainerPaths,
+    ) -> Self {
         let sentencepiece = &config.sentencepiece;
         Self {
-            input: corpus_path.to_path_buf(),
+            input: corpus_paths.to_vec(),
             model_prefix: paths.model_prefix.clone(),
             model_type: model_type(sentencepiece),
             vocab_size: sentencepiece.vocab_size,
@@ -372,10 +376,10 @@ mod tests {
     use std::path::Path;
 
     use crate::config::{
-        BalanceAxis, BalancingConfig, CanonicalizationConfig, CorpusConfig, EffectiveConfig,
-        LinePolicy, ModelType, NormalizationRuleName, OutputConfig, PythonTrainerConfig,
-        SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind, UnicodeForm,
-        ValidationConfig, ValidationMode,
+        BalanceAxis, BalancingConfig, BalancingMode, CanonicalizationConfig, CorpusConfig,
+        EffectiveConfig, LinePolicy, ModelType, NormalizationRuleName, OutputConfig,
+        PythonTrainerConfig, SentencePieceConfig, SoftHyphenPolicy, StripRule, TrainerKind,
+        UnicodeForm, ValidationConfig, ValidationMode,
     };
 
     use super::*;
@@ -399,9 +403,20 @@ mod tests {
             },
             balancing: BalancingConfig {
                 enabled: true,
+                mode: BalancingMode::Conservative,
                 total_lines: 20_000_000,
-                alpha: 0.3,
-                hierarchy: vec![BalanceAxis::Domain, BalanceAxis::Script],
+                alpha: 0.7,
+                hierarchy: vec![
+                    BalanceAxis::Domain,
+                    BalanceAxis::Script,
+                    BalanceAxis::LanguageHint,
+                    BalanceAxis::SourceGroup,
+                    BalanceAxis::LengthBin,
+                ],
+                min_keep_fraction: 0.5,
+                max_downsample_ratio: 4.0,
+                collapse_buckets_below_lines: 1000,
+                max_part_lines: 1_000_000,
                 shuffle_seed: 1337,
             },
             sentencepiece: SentencePieceConfig {
@@ -444,10 +459,13 @@ mod tests {
         let config = config(Path::new("runs/demo"));
         let paths = TrainerPaths::from_config(&config);
 
-        let corpus_path = PathBuf::from("runs/demo/fixed_corpus.txt");
-        let request = build_trainer_request(&config, &corpus_path, &paths);
+        let corpus_paths = vec![
+            PathBuf::from("runs/demo/train_corpus/text-latin-en.txt"),
+            PathBuf::from("runs/demo/train_corpus/text-cyrillic-uk.txt"),
+        ];
+        let request = build_trainer_request(&config, &corpus_paths, &paths);
 
-        assert_eq!(request.sentencepiece.input, corpus_path);
+        assert_eq!(request.sentencepiece.input, corpus_paths);
         assert_eq!(
             request.sentencepiece.model_prefix,
             PathBuf::from("runs/demo/ocr_tokenizer")

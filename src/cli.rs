@@ -39,6 +39,7 @@ struct TrainSummary {
     corpus_path: PathBuf,
     text_files: usize,
     fixed_corpus: PathBuf,
+    training_files: Vec<PathBuf>,
     issue_log: PathBuf,
     lines_read: u64,
     lines_written: u64,
@@ -87,9 +88,10 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
             format!(", {} source issue(s) logged", summary.source_issues)
         };
         println!(
-            "Trained: preset `{}`, {} text file(s), {} repaired line(s), {} balanced line(s), {} fixed, {} skipped{}, model `{}`",
+            "Trained: preset `{}`, {} text file(s), {} training part(s), {} repaired line(s), {} balanced line(s), {} fixed, {} skipped{}, model `{}`",
             summary.preset,
             summary.text_files,
+            summary.training_files.len(),
             summary.lines_written,
             summary.balanced_lines,
             summary.lines_fixed,
@@ -145,7 +147,7 @@ fn train_sentencepiece(
     balance: &BalanceSummary,
     progress: &ProgressReporter,
 ) -> Result<TrainerOutput> {
-    trainer::train_sentencepiece(config, &balance.fixed_corpus, progress)
+    trainer::train_sentencepiece(config, &balance.training_files, progress)
         .context("could not train SentencePiece")
 }
 
@@ -162,6 +164,7 @@ impl TrainSummary {
             corpus_path: corpus.root.clone(),
             text_files: corpus.files.len(),
             fixed_corpus: repair.fixed_corpus.clone(),
+            training_files: balance.training_files.clone(),
             issue_log: repair.issue_log.clone(),
             lines_read: repair.lines_read,
             lines_written: repair.lines_written,
