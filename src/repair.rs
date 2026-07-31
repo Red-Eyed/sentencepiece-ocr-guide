@@ -8,7 +8,7 @@ use serde::Serialize;
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::balance::{classify_line, shard_file_name, BucketKey};
+use crate::balance::{classify_line_with_hints, shard_file_name, BucketKey, SourceHints};
 use crate::cancel::{CancellationToken, Cancelled};
 use crate::config::EffectiveConfig;
 use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId, DiscoveredCorpus};
@@ -16,8 +16,14 @@ use crate::normalize::canonicalize_line;
 use crate::progress::{ProgressReporter, StageProgress};
 
 const FIXED_CORPUS_NAME: &str = "fixed_corpus.txt";
-const REPAIR_CHUNK_LINES: usize = 4096;
+
+// Repair chunks are counted in lines, not bytes. This keeps Rayon tasks large enough for
+// normal OCR text while preserving responsive cancellation at chunk boundaries.
+const REPAIR_LINES_PER_CHUNK: usize = 4096;
 const REPAIR_BATCH_CHUNKS_PER_THREAD: usize = 2;
+
+// Large sequential buffers reduce syscall churn while scanning and writing corpus-sized files.
+const IO_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RepairSummary {
@@ -264,12 +270,14 @@ impl<'a> RepairWriter<'a> {
             path: path.to_path_buf(),
             source,
         })?;
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(IO_BUFFER_BYTES, file);
         let mut bytes = Vec::new();
         let mut line_number = 0;
-        let mut chunk = Vec::with_capacity(REPAIR_CHUNK_LINES);
+        let mut chunk = Vec::with_capacity(REPAIR_LINES_PER_CHUNK);
+        let mut chunk_bytes = 0;
         let batch_chunks = repair_batch_chunks(self.config.num_threads);
         let mut chunks = Vec::with_capacity(batch_chunks);
+        let source_hints = SourceHints::from_path(&classification_path(&self.corpus_root, path));
 
         loop {
             cancellation.check()?;
@@ -282,24 +290,38 @@ impl<'a> RepairWriter<'a> {
                         source,
                     })?;
             if read == 0 {
+                progress.inc(chunk_bytes);
                 push_nonempty_chunk(&mut chunks, std::mem::take(&mut chunk));
-                self.repair_chunk_batch(path, std::mem::take(&mut chunks), cancellation)?;
+                self.repair_chunk_batch(
+                    path,
+                    &source_hints,
+                    std::mem::take(&mut chunks),
+                    cancellation,
+                )?;
                 return Ok(());
             }
 
             line_number += 1;
             self.summary.lines_read += 1;
-            progress.inc(read as u64);
+            chunk_bytes += read as u64;
             trim_line_ending(&mut bytes);
+            let line_bytes = std::mem::replace(&mut bytes, Vec::with_capacity(read.max(1024)));
             chunk.push(RawLine {
                 line_number,
-                bytes: bytes.clone(),
+                bytes: line_bytes,
             });
 
-            if chunk.len() == REPAIR_CHUNK_LINES {
+            if chunk.len() == REPAIR_LINES_PER_CHUNK {
+                progress.inc(chunk_bytes);
+                chunk_bytes = 0;
                 chunks.push(std::mem::take(&mut chunk));
                 if chunks.len() == batch_chunks {
-                    self.repair_chunk_batch(path, std::mem::take(&mut chunks), cancellation)?;
+                    self.repair_chunk_batch(
+                        path,
+                        &source_hints,
+                        std::mem::take(&mut chunks),
+                        cancellation,
+                    )?;
                 }
             }
         }
@@ -308,6 +330,7 @@ impl<'a> RepairWriter<'a> {
     fn repair_chunk_batch(
         &mut self,
         path: &Path,
+        source_hints: &SourceHints,
         chunks: Vec<Vec<RawLine>>,
         cancellation: &CancellationToken,
     ) -> Result<(), RepairError> {
@@ -323,7 +346,7 @@ impl<'a> RepairWriter<'a> {
             cancellation.check()?;
             for line in chunk {
                 cancellation.check()?;
-                self.apply_processed_line(path, line)?;
+                self.apply_processed_line(source_hints, line)?;
             }
         }
         Ok(())
@@ -331,7 +354,7 @@ impl<'a> RepairWriter<'a> {
 
     fn apply_processed_line(
         &mut self,
-        source_path: &Path,
+        source_hints: &SourceHints,
         line: ProcessedLine,
     ) -> Result<(), RepairError> {
         for issue in line.issues {
@@ -343,12 +366,12 @@ impl<'a> RepairWriter<'a> {
         }
 
         for chunk in line.output_lines {
-            self.write_line(source_path, &chunk)?;
+            self.write_line(source_hints, &chunk)?;
         }
         Ok(())
     }
 
-    fn write_line(&mut self, source_path: &Path, line: &str) -> Result<(), RepairError> {
+    fn write_line(&mut self, source_hints: &SourceHints, line: &str) -> Result<(), RepairError> {
         self.output
             .write_all(line.as_bytes())
             .and_then(|_| self.output.write_all(b"\n"))
@@ -357,11 +380,15 @@ impl<'a> RepairWriter<'a> {
                 source,
             })?;
         self.summary.lines_written += 1;
-        self.write_shard_line(source_path, line)
+        self.write_shard_line(source_hints, line)
     }
 
-    fn write_shard_line(&mut self, source_path: &Path, line: &str) -> Result<(), RepairError> {
-        let bucket = classify_line(&classification_path(&self.corpus_root, source_path), line);
+    fn write_shard_line(
+        &mut self,
+        source_hints: &SourceHints,
+        line: &str,
+    ) -> Result<(), RepairError> {
+        let bucket = classify_line_with_hints(source_hints, line);
         let shard_path = self.shard_dir.join(shard_file_name(&bucket));
         if !self.shard_writers.contains_key(&bucket) {
             let writer = open_writer(&shard_path)?;
@@ -457,7 +484,7 @@ fn process_raw_chunk(
 }
 
 fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> ProcessedLine {
-    let text = match std::str::from_utf8(&raw.bytes) {
+    let text = match String::from_utf8(raw.bytes) {
         Ok(text) => text,
         Err(error) => {
             return ProcessedLine {
@@ -466,7 +493,7 @@ fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> Proc
                     raw.line_number,
                     IssueId::InvalidUtf8,
                     IssueAction::Skipped,
-                    error.to_string(),
+                    error.utf8_error().to_string(),
                     None,
                 )],
                 output_lines: Vec::new(),
@@ -475,8 +502,11 @@ fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> Proc
     };
 
     let mut issues = Vec::new();
-    let canonicalized = canonicalize_line(text, &config.canonicalization);
-    if canonicalize_line(&canonicalized.text, &config.canonicalization).text != canonicalized.text {
+    let canonicalized = canonicalize_line(&text, &config.canonicalization);
+    if canonicalized.changed
+        && canonicalize_line(&canonicalized.text, &config.canonicalization).text
+            != canonicalized.text
+    {
         return ProcessedLine {
             issues: vec![issue(
                 path,
@@ -484,7 +514,7 @@ fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> Proc
                 IssueId::NonIdempotentCanonicalization,
                 IssueAction::Skipped,
                 "line changed after a second canonicalization pass",
-                maybe_line_text(text, config.validation.include_line_text_in_log),
+                maybe_line_text(&text, config.validation.include_line_text_in_log),
             )],
             output_lines: Vec::new(),
         };
@@ -497,12 +527,13 @@ fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> Proc
             IssueId::Canonicalized,
             IssueAction::Fixed,
             "line changed under configured canonicalization",
-            maybe_line_text(text, config.validation.include_line_text_in_log),
+            maybe_line_text(&text, config.validation.include_line_text_in_log),
         ));
     }
 
+    let canonicalized_len = canonicalized.text.len();
     let max_sentence_length = config.sentencepiece.max_sentence_length as usize;
-    let Some(chunks) = chunk_line(&canonicalized.text, max_sentence_length) else {
+    let Some(chunks) = chunk_owned_line(canonicalized.text, max_sentence_length) else {
         return ProcessedLine {
             issues: vec![issue(
                 path,
@@ -513,7 +544,7 @@ fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> Proc
                     "canonicalized line has a grapheme cluster over max_sentence_length {}",
                     config.sentencepiece.max_sentence_length
                 ),
-                maybe_line_text(text, config.validation.include_line_text_in_log),
+                maybe_line_text(&text, config.validation.include_line_text_in_log),
             )],
             output_lines: Vec::new(),
         };
@@ -527,11 +558,11 @@ fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> Proc
             IssueAction::Fixed,
             format!(
                 "canonicalized line is {} byte(s), split into {} chunk(s) at max_sentence_length {}",
-                canonicalized.text.len(),
+                canonicalized_len,
                 chunks.len(),
                 config.sentencepiece.max_sentence_length
             ),
-            maybe_line_text(text, config.validation.include_line_text_in_log),
+            maybe_line_text(&text, config.validation.include_line_text_in_log),
         ));
     }
 
@@ -606,20 +637,25 @@ fn corpus_size_bytes(corpus: &DiscoveredCorpus) -> u64 {
         .sum()
 }
 
+#[cfg(test)]
 fn chunk_line(text: &str, max_bytes: usize) -> Option<Vec<String>> {
+    chunk_owned_line(text.to_owned(), max_bytes)
+}
+
+fn chunk_owned_line(text: String, max_bytes: usize) -> Option<Vec<String>> {
     if max_bytes == 0 {
         return None;
     }
 
     if text.len() <= max_bytes {
-        return Some(vec![text.to_owned()]);
+        return Some(vec![text]);
     }
 
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
         let limit = (start + max_bytes).min(text.len());
-        let end = safe_chunk_end(text, start, limit)?;
+        let end = safe_chunk_end(&text, start, limit)?;
         if end <= start {
             return None;
         }
@@ -676,7 +712,7 @@ fn create_parent_dir(path: &Path) -> Result<(), RepairError> {
 
 fn open_writer(path: &Path) -> Result<BufWriter<File>, RepairError> {
     File::create(path)
-        .map(BufWriter::new)
+        .map(|file| BufWriter::with_capacity(IO_BUFFER_BYTES, file))
         .map_err(|source| RepairError::Open {
             path: path.to_path_buf(),
             source,
@@ -891,7 +927,7 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let input = temp.path().join("raw.txt");
         let mut corpus_text = String::new();
-        for index in 0..(REPAIR_CHUNK_LINES + 3) {
+        for index in 0..(REPAIR_LINES_PER_CHUNK + 3) {
             corpus_text.push_str(&format!("line-{index}\n"));
         }
         fs::write(&input, corpus_text).expect("write input");
@@ -909,9 +945,9 @@ mod tests {
         let fixed = fs::read_to_string(output.join(FIXED_CORPUS_NAME)).expect("read fixed corpus");
         let lines = fixed.lines().collect::<Vec<_>>();
 
-        assert_eq!(summary.lines_written, (REPAIR_CHUNK_LINES + 3) as u64);
+        assert_eq!(summary.lines_written, (REPAIR_LINES_PER_CHUNK + 3) as u64);
         assert_eq!(lines.first(), Some(&"line-0"));
-        let expected_last = format!("line-{}", REPAIR_CHUNK_LINES + 2);
+        let expected_last = format!("line-{}", REPAIR_LINES_PER_CHUNK + 2);
         assert_eq!(lines.last().copied(), Some(expected_last.as_str()));
     }
 

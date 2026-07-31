@@ -1,5 +1,8 @@
 use indicatif::{ProgressBar, ProgressStyle};
 
+const STAGE_BAR_TEMPLATE: &str =
+    "{bar:40.cyan/blue} {bytes}/{total_bytes} {elapsed_precise} eta {eta_precise} {msg}";
+
 pub struct ProgressReporter {
     json_output: bool,
 }
@@ -37,7 +40,7 @@ impl ProgressReporter {
 
         let bar = ProgressBar::new(total);
         bar.set_style(
-            ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} {msg}")
+            ProgressStyle::with_template(STAGE_BAR_TEMPLATE)
                 .expect("bar progress template is static")
                 .progress_chars("=> "),
         );
@@ -74,6 +77,8 @@ mod tests {
         let stage = progress.stage_bar("fixing corpus", 3);
 
         assert_eq!(stage.bar.length(), Some(3));
+        assert!(STAGE_BAR_TEMPLATE.contains("{bytes}/{total_bytes}"));
+        assert!(STAGE_BAR_TEMPLATE.contains("eta {eta_precise}"));
         stage.inc(1);
         assert_eq!(stage.bar.position(), 1);
         stage.finish("done");

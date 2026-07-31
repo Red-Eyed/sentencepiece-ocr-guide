@@ -14,6 +14,8 @@ use crate::config::EffectiveConfig;
 use crate::progress::ProgressReporter;
 use crate::repair::{RepairSummary, ShardSummary};
 
+const IO_BUFFER_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BalanceSummary {
     pub training_files: Vec<PathBuf>,
@@ -39,6 +41,12 @@ pub struct BucketKey {
     pub language_hint: String,
     pub source_group: String,
     pub length_bin: LengthBin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceHints {
+    pub language_hint: String,
+    pub source_group: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -80,18 +88,31 @@ pub enum BalanceError {
     },
 }
 
+#[cfg(test)]
 pub fn classify_line(path: &Path, text: &str) -> BucketKey {
+    let hints = SourceHints::from_path(path);
+    classify_line_with_hints(&hints, text)
+}
+
+pub fn classify_line_with_hints(hints: &SourceHints, text: &str) -> BucketKey {
     let domain = classify_domain(text);
     let script = dominant_script(text);
-    let language_hint = language_hint(path).unwrap_or_else(|| "unknown".to_owned());
-    let source_group = source_group(path);
     let length_bin = length_bin(text);
     BucketKey {
         domain,
         script,
-        language_hint,
-        source_group,
+        language_hint: hints.language_hint.clone(),
+        source_group: hints.source_group.clone(),
         length_bin,
+    }
+}
+
+impl SourceHints {
+    pub fn from_path(path: &Path) -> Self {
+        Self {
+            language_hint: language_hint(path).unwrap_or_else(|| "unknown".to_owned()),
+            source_group: source_group(path),
+        }
     }
 }
 
@@ -142,8 +163,8 @@ fn assemble_balanced(
             continue;
         };
         let lines = sample_shard(shard, target, config.balancing.shuffle_seed)?;
+        let output_lines = lines.len() as u64;
         let training_files = write_training_parts(config, paths, &shard.bucket, lines)?;
-        let output_lines = count_lines_in_files(&training_files)?;
         buckets.push(BucketBalance {
             bucket: shard.bucket.clone(),
             input_lines: shard.lines,
@@ -283,7 +304,7 @@ fn sample_shard(shard: &ShardSummary, target: u64, seed: u64) -> Result<Vec<Stri
         path: shard.path.clone(),
         source,
     })?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(IO_BUFFER_BYTES, file);
     if shard.lines <= target {
         return reader
             .lines()
@@ -371,32 +392,13 @@ fn write_training_parts(
     Ok(files)
 }
 
-fn count_lines_in_files(paths: &[PathBuf]) -> Result<u64, BalanceError> {
-    paths.iter().try_fold(0, |total, path| {
-        let file = File::open(path).map_err(|source| BalanceError::Open {
-            path: path.clone(),
-            source,
-        })?;
-        let reader = BufReader::new(file);
-        let mut count = 0;
-        for line in reader.lines() {
-            line.map_err(|source| BalanceError::Read {
-                path: path.clone(),
-                source,
-            })?;
-            count += 1;
-        }
-        Ok(total + count)
-    })
-}
-
 fn write_lines(path: &Path, lines: &[String]) -> Result<(), BalanceError> {
     create_parent_dir(path)?;
     let file = File::create(path).map_err(|source| BalanceError::Write {
         path: path.to_path_buf(),
         source,
     })?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::with_capacity(IO_BUFFER_BYTES, file);
     for line in lines {
         writer
             .write_all(line.as_bytes())

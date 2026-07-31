@@ -1,4 +1,4 @@
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{is_nfc, UnicodeNormalization};
 
 use crate::config::{CanonicalizationConfig, SoftHyphenPolicy, StripRule, UnicodeForm};
 
@@ -9,12 +9,32 @@ pub struct CanonicalizedLine {
 }
 
 pub fn canonicalize_line(input: &str, config: &CanonicalizationConfig) -> CanonicalizedLine {
+    if is_already_canonical(input, config) {
+        return CanonicalizedLine {
+            changed: false,
+            text: input.to_owned(),
+        };
+    }
+
     let mapped = map_configured_characters(input, config);
     let normalized = normalize_unicode(&mapped, config.unicode_form);
     CanonicalizedLine {
         changed: normalized != input,
         text: normalized,
     }
+}
+
+fn is_already_canonical(input: &str, config: &CanonicalizationConfig) -> bool {
+    !needs_configured_mapping(input, config) && is_normalized(input, config.unicode_form)
+}
+
+fn needs_configured_mapping(input: &str, config: &CanonicalizationConfig) -> bool {
+    input.chars().any(|character| {
+        should_strip(character, config)
+            || character == '\u{00ad}'
+            || character == '\u{00a0}' && config.map_nbsp_to_space
+            || is_arabic_presentation_form(character) && config.fold_arabic_presentation_forms
+    })
 }
 
 fn map_configured_characters(input: &str, config: &CanonicalizationConfig) -> String {
@@ -72,6 +92,12 @@ fn is_arabic_presentation_form(character: char) -> bool {
 fn normalize_unicode(input: &str, form: UnicodeForm) -> String {
     match form {
         UnicodeForm::Nfc => input.nfc().collect(),
+    }
+}
+
+fn is_normalized(input: &str, form: UnicodeForm) -> bool {
+    match form {
+        UnicodeForm::Nfc => input.is_ascii() || is_nfc(input),
     }
 }
 
