@@ -74,6 +74,9 @@ Or directly:
 RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" CFLAGS="${CFLAGS:-} -march=native" cargo run --release -- train --config cfg.json
 ```
 
+Press Ctrl+C to stop a run. During SentencePiece training, `spm-ocr` also stops the Python
+trainer subprocess before exiting.
+
 ## Outputs
 
 - `work_dir/train_corpus/*.txt`: meaningful corpus parts used for training.

@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::cancel::{CancellationToken, Cancelled};
 use crate::config::{EffectiveConfig, SentencePieceConfig};
 use crate::progress::ProgressReporter;
 
@@ -90,14 +91,22 @@ pub enum TrainerError {
         program: String,
         source: std::io::Error,
     },
+    #[error("failed to stop trainer `{program}`: {source}")]
+    Stop {
+        program: String,
+        source: std::io::Error,
+    },
     #[error("trainer failed with status {status}")]
     Failed { status: String },
+    #[error("interrupted")]
+    Interrupted(#[from] Cancelled),
 }
 
 pub fn train_sentencepiece(
     config: &EffectiveConfig,
     corpus_paths: &[PathBuf],
     progress: &ProgressReporter,
+    cancellation: &CancellationToken,
 ) -> Result<TrainerOutput, TrainerError> {
     let paths = TrainerPaths::from_config(config);
     paths.create_dirs()?;
@@ -128,6 +137,15 @@ pub fn train_sentencepiece(
 
     let mut captured = CapturedOutput::default();
     let exit_status = loop {
+        if cancellation.is_cancelled() {
+            stage.finish("training SentencePiece interrupted; stopping trainer");
+            stop_child(&mut child, &config.sentencepiece.python.runner)?;
+            drain_lines(&receiver, &mut captured);
+            join_reader(stdout_reader);
+            join_reader(stderr_reader);
+            return Err(TrainerError::Interrupted(Cancelled));
+        }
+
         drain_lines(&receiver, &mut captured);
         stage.set_message(format!(
             "training SentencePiece: {}s elapsed{}",
@@ -173,6 +191,29 @@ pub fn train_sentencepiece(
 
     stage.finish(format!("SentencePiece trained in {elapsed_ms}ms"));
     Ok(output)
+}
+
+fn stop_child(child: &mut Child, program: &str) -> Result<(), TrainerError> {
+    if child
+        .try_wait()
+        .map_err(|source| TrainerError::Wait {
+            program: program.to_owned(),
+            source,
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    child.kill().map_err(|source| TrainerError::Stop {
+        program: program.to_owned(),
+        source,
+    })?;
+    child.wait().map_err(|source| TrainerError::Wait {
+        program: program.to_owned(),
+        source,
+    })?;
+    Ok(())
 }
 
 pub fn build_trainer_request(

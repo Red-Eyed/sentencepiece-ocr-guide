@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::balance::{self, BalanceSummary};
+use crate::cancel::CancellationToken;
 use crate::config::{self, EffectiveConfig};
 use crate::corpus::{self, DiscoveredCorpus};
 use crate::progress::ProgressReporter;
@@ -57,17 +58,22 @@ struct TrainSummary {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    let cancellation =
+        CancellationToken::install_ctrlc_handler().context("could not install Ctrl+C handler")?;
+
     match cli.command {
-        Command::Train(args) => train(args, cli.json),
+        Command::Train(args) => train(args, cli.json, &cancellation),
     }
 }
 
-fn train(args: TrainArgs, json_output: bool) -> Result<()> {
+fn train(args: TrainArgs, json_output: bool, cancellation: &CancellationToken) -> Result<()> {
     let progress = ProgressReporter::new(json_output);
 
     let config = load_config(&args, &progress)?;
+    cancellation.check()?;
     let corpus = discover_corpus(&config, &progress)?;
-    let repair = repair_corpus(&config, &corpus, &progress)?;
+    cancellation.check()?;
+    let repair = repair_corpus(&config, &corpus, &progress, cancellation)?;
     if repair.lines_written == 0 {
         bail!(
             "no usable text lines found under {}; see {}",
@@ -75,8 +81,10 @@ fn train(args: TrainArgs, json_output: bool) -> Result<()> {
             repair.issue_log.display()
         );
     }
+    cancellation.check()?;
     let balance = balance_corpus(&config, &repair, &progress)?;
-    let trainer = train_sentencepiece(&config, &balance, &progress)?;
+    cancellation.check()?;
+    let trainer = train_sentencepiece(&config, &balance, &progress, cancellation)?;
     let summary = TrainSummary::from_outputs(&config, &corpus, &repair, &balance, &trainer);
 
     if json_output {
@@ -129,8 +137,9 @@ fn repair_corpus(
     config: &EffectiveConfig,
     corpus: &DiscoveredCorpus,
     progress: &ProgressReporter,
+    cancellation: &CancellationToken,
 ) -> Result<RepairSummary> {
-    repair::repair_corpus(config, corpus, progress)
+    repair::repair_corpus(config, corpus, progress, cancellation)
         .with_context(|| format!("could not repair {}", config.corpus.path.display()))
 }
 
@@ -146,8 +155,9 @@ fn train_sentencepiece(
     config: &EffectiveConfig,
     balance: &BalanceSummary,
     progress: &ProgressReporter,
+    cancellation: &CancellationToken,
 ) -> Result<TrainerOutput> {
-    trainer::train_sentencepiece(config, &balance.training_files, progress)
+    trainer::train_sentencepiece(config, &balance.training_files, progress, cancellation)
         .context("could not train SentencePiece")
 }
 

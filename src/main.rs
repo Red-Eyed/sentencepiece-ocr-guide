@@ -1,4 +1,5 @@
 mod balance;
+mod cancel;
 mod cli;
 mod config;
 mod corpus;

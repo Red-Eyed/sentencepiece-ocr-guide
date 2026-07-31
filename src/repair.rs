@@ -9,6 +9,7 @@ use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::balance::{classify_line, shard_file_name, BucketKey};
+use crate::cancel::{CancellationToken, Cancelled};
 use crate::config::EffectiveConfig;
 use crate::corpus::{CorpusSourceIssue, CorpusSourceIssueId, DiscoveredCorpus};
 use crate::normalize::canonicalize_line;
@@ -16,6 +17,7 @@ use crate::progress::{ProgressReporter, StageProgress};
 
 const FIXED_CORPUS_NAME: &str = "fixed_corpus.txt";
 const REPAIR_CHUNK_LINES: usize = 4096;
+const REPAIR_BATCH_CHUNKS_PER_THREAD: usize = 2;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RepairSummary {
@@ -61,6 +63,8 @@ pub enum RepairError {
     },
     #[error("failed to create repair thread pool: {0}")]
     ThreadPool(#[from] ThreadPoolBuildError),
+    #[error("interrupted")]
+    Interrupted(#[from] Cancelled),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +104,7 @@ pub fn repair_corpus(
     config: &EffectiveConfig,
     corpus: &DiscoveredCorpus,
     progress: &ProgressReporter,
+    cancellation: &CancellationToken,
 ) -> Result<RepairSummary, RepairError> {
     let paths = RepairPaths::from_config(config);
     paths.create_dirs()?;
@@ -112,7 +117,11 @@ pub fn repair_corpus(
     writer.write_source_issues(&corpus.issues)?;
 
     let stage = progress.stage_bar("fixing corpus", corpus_size_bytes(corpus));
-    pool.install(|| repair_files(&mut writer, &corpus.files, &stage))?;
+    let result = pool.install(|| repair_files(&mut writer, &corpus.files, &stage, cancellation));
+    if let Err(error) = result {
+        stage.finish("fixing corpus interrupted");
+        return Err(error);
+    }
     stage.finish(format!(
         "fixed corpus: {} written, {} fixed, {} skipped",
         writer.summary.lines_written, writer.summary.lines_fixed, writer.summary.lines_skipped
@@ -135,9 +144,11 @@ fn repair_files(
     writer: &mut RepairWriter<'_>,
     files: &[PathBuf],
     stage: &StageProgress,
+    cancellation: &CancellationToken,
 ) -> Result<(), RepairError> {
     for file in files {
-        writer.repair_file(file, stage)?;
+        cancellation.check()?;
+        writer.repair_file(file, stage, cancellation)?;
         stage.set_message(format!(
             "fixing corpus: {} line(s), {} fixed, {} skipped",
             writer.summary.lines_read, writer.summary.lines_fixed, writer.summary.lines_skipped
@@ -243,7 +254,12 @@ impl<'a> RepairWriter<'a> {
         Ok(())
     }
 
-    fn repair_file(&mut self, path: &Path, progress: &StageProgress) -> Result<(), RepairError> {
+    fn repair_file(
+        &mut self,
+        path: &Path,
+        progress: &StageProgress,
+        cancellation: &CancellationToken,
+    ) -> Result<(), RepairError> {
         let file = File::open(path).map_err(|source| RepairError::Open {
             path: path.to_path_buf(),
             source,
@@ -252,8 +268,11 @@ impl<'a> RepairWriter<'a> {
         let mut bytes = Vec::new();
         let mut line_number = 0;
         let mut chunk = Vec::with_capacity(REPAIR_CHUNK_LINES);
+        let batch_chunks = repair_batch_chunks(self.config.num_threads);
+        let mut chunks = Vec::with_capacity(batch_chunks);
 
         loop {
+            cancellation.check()?;
             bytes.clear();
             let read =
                 reader
@@ -263,7 +282,8 @@ impl<'a> RepairWriter<'a> {
                         source,
                     })?;
             if read == 0 {
-                self.repair_chunk(path, std::mem::take(&mut chunk))?;
+                push_nonempty_chunk(&mut chunks, std::mem::take(&mut chunk));
+                self.repair_chunk_batch(path, std::mem::take(&mut chunks), cancellation)?;
                 return Ok(());
             }
 
@@ -277,22 +297,34 @@ impl<'a> RepairWriter<'a> {
             });
 
             if chunk.len() == REPAIR_CHUNK_LINES {
-                self.repair_chunk(path, std::mem::take(&mut chunk))?;
+                chunks.push(std::mem::take(&mut chunk));
+                if chunks.len() == batch_chunks {
+                    self.repair_chunk_batch(path, std::mem::take(&mut chunks), cancellation)?;
+                }
             }
         }
     }
 
-    fn repair_chunk(&mut self, path: &Path, chunk: Vec<RawLine>) -> Result<(), RepairError> {
-        if chunk.is_empty() {
+    fn repair_chunk_batch(
+        &mut self,
+        path: &Path,
+        chunks: Vec<Vec<RawLine>>,
+        cancellation: &CancellationToken,
+    ) -> Result<(), RepairError> {
+        if chunks.is_empty() {
             return Ok(());
         }
 
-        let processed = chunk
+        let processed_chunks = chunks
             .into_par_iter()
-            .map(|line| process_raw_line(self.config, path, line))
-            .collect::<Vec<_>>();
-        for line in processed {
-            self.apply_processed_line(path, line)?;
+            .map(|chunk| process_raw_chunk(self.config, path, chunk, cancellation))
+            .collect::<Result<Vec<_>, RepairError>>()?;
+        for chunk in processed_chunks {
+            cancellation.check()?;
+            for line in chunk {
+                cancellation.check()?;
+                self.apply_processed_line(path, line)?;
+            }
         }
         Ok(())
     }
@@ -396,6 +428,32 @@ impl<'a> RepairWriter<'a> {
             .sort_by(|left, right| left.bucket.cmp(&right.bucket));
         Ok(self.summary)
     }
+}
+
+fn repair_batch_chunks(num_threads: u32) -> usize {
+    (num_threads as usize)
+        .saturating_mul(REPAIR_BATCH_CHUNKS_PER_THREAD)
+        .max(1)
+}
+
+fn push_nonempty_chunk(chunks: &mut Vec<Vec<RawLine>>, chunk: Vec<RawLine>) {
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+}
+
+fn process_raw_chunk(
+    config: &EffectiveConfig,
+    path: &Path,
+    chunk: Vec<RawLine>,
+    cancellation: &CancellationToken,
+) -> Result<Vec<ProcessedLine>, RepairError> {
+    let mut processed = Vec::with_capacity(chunk.len());
+    for line in chunk {
+        cancellation.check()?;
+        processed.push(process_raw_line(config, path, line));
+    }
+    Ok(processed)
 }
 
 fn process_raw_line(config: &EffectiveConfig, path: &Path, raw: RawLine) -> ProcessedLine {
@@ -739,7 +797,8 @@ mod tests {
         };
         let progress = ProgressReporter::new(true);
 
-        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+        let summary = repair_corpus(&config, &corpus, &progress, &CancellationToken::default())
+            .expect("repair corpus");
 
         assert_eq!(summary.lines_read, 2);
         assert_eq!(summary.lines_written, 2);
@@ -770,7 +829,8 @@ mod tests {
         };
         let progress = ProgressReporter::new(true);
 
-        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+        let summary = repair_corpus(&config, &corpus, &progress, &CancellationToken::default())
+            .expect("repair corpus");
 
         assert_eq!(summary.lines_read, 2);
         assert_eq!(summary.lines_written, 1);
@@ -801,7 +861,8 @@ mod tests {
         };
         let progress = ProgressReporter::new(true);
 
-        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+        let summary = repair_corpus(&config, &corpus, &progress, &CancellationToken::default())
+            .expect("repair corpus");
 
         assert_eq!(summary.lines_read, 1);
         assert_eq!(summary.lines_written, 3);
@@ -843,7 +904,8 @@ mod tests {
         };
         let progress = ProgressReporter::new(true);
 
-        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+        let summary = repair_corpus(&config, &corpus, &progress, &CancellationToken::default())
+            .expect("repair corpus");
         let fixed = fs::read_to_string(output.join(FIXED_CORPUS_NAME)).expect("read fixed corpus");
         let lines = fixed.lines().collect::<Vec<_>>();
 
@@ -869,13 +931,36 @@ mod tests {
         };
         let progress = ProgressReporter::new(true);
 
-        let summary = repair_corpus(&config, &corpus, &progress).expect("repair corpus");
+        let summary = repair_corpus(&config, &corpus, &progress, &CancellationToken::default())
+            .expect("repair corpus");
 
         assert_eq!(summary.source_issues, 1);
         let issue_log =
             fs::read_to_string(output.join("reports/corpus_issues.jsonl")).expect("read issue log");
         assert!(issue_log.contains("\"id\":\"unsupported_file\""));
         assert!(issue_log.contains("\"action\":\"skipped\""));
+    }
+
+    #[test]
+    fn interrupted_repair_stops_before_processing() {
+        let temp = TempDir::new().expect("temp dir");
+        let input = temp.path().join("raw.txt");
+        fs::write(&input, "line\n").expect("write input");
+        let output = temp.path().join("run");
+        let config = config(&output, &input);
+        let corpus = DiscoveredCorpus {
+            root: input.clone(),
+            files: vec![input],
+            issues: vec![],
+        };
+        let progress = ProgressReporter::new(true);
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+
+        let error = repair_corpus(&config, &corpus, &progress, &cancellation)
+            .expect_err("interrupted repair should stop");
+
+        assert!(matches!(error, RepairError::Interrupted(Cancelled)));
     }
 
     #[test]
