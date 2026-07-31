@@ -114,7 +114,11 @@ pub fn train_sentencepiece(
     let request = build_trainer_request(config, corpus_paths, &paths);
     write_json(&paths.request, &request)?;
 
-    let stage = progress.stage("training SentencePiece");
+    let stage = progress.stage(format!(
+        "training SentencePiece: {} part(s), model_prefix `{}`",
+        corpus_paths.len(),
+        config.output.model_prefix
+    ));
     let started = Instant::now();
     let mut child = Command::new(&config.sentencepiece.python.runner)
         .args(&config.sentencepiece.python.args)

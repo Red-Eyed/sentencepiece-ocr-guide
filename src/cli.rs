@@ -161,10 +161,14 @@ fn train_from_existing_corpus(
 }
 
 fn load_config(args: &TrainArgs, progress: &ProgressReporter) -> Result<EffectiveConfig> {
-    let stage = progress.stage("loading config");
+    let stage = progress.stage(format!("loading config: {}", args.config.display()));
     let config = config::load_effective_config(&args.config, &args.preset_config)
         .with_context(|| format!("could not load {}", args.config.display()))?;
-    stage.finish("loaded config");
+    stage.finish(format!(
+        "loaded config: preset `{}`, work_dir `{}`",
+        config.preset,
+        config.output.work_dir.display()
+    ));
     Ok(config)
 }
 
@@ -172,12 +176,19 @@ fn discover_corpus(
     config: &EffectiveConfig,
     progress: &ProgressReporter,
 ) -> Result<DiscoveredCorpus> {
-    let stage = progress.stage("discovering corpus text files");
+    let stage = progress.stage(format!(
+        "discovering corpus: {}",
+        config.corpus.path.display()
+    ));
     let unpack_dir = config.output.work_dir.join("unpacked");
     let corpus = corpus::discover_text_files(&config.corpus.path, &unpack_dir)
         .with_context(|| format!("could not discover {}", config.corpus.path.display()))?;
 
-    stage.finish(format!("found {} text file(s)", corpus.files.len()));
+    stage.finish(format!(
+        "found {} text file(s), {} source issue(s)",
+        corpus.files.len(),
+        corpus.issues.len()
+    ));
     Ok(corpus)
 }
 
@@ -203,8 +214,11 @@ fn load_existing_balance(
     config: &EffectiveConfig,
     progress: &ProgressReporter,
 ) -> Result<BalanceSummary> {
-    let stage = progress.stage("loading existing training corpus");
     let report = config.output.work_dir.join("reports/balance.json");
+    let stage = progress.stage(format!(
+        "loading existing training corpus: {}",
+        report.display()
+    ));
     let balance = read_json::<BalanceSummary>(&report).with_context(|| {
         format!(
             "could not load existing balance report {}",

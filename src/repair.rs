@@ -122,7 +122,10 @@ pub fn repair_corpus(
     let mut writer = RepairWriter::new(output, issues, config, corpus.root.clone(), &paths);
     writer.write_source_issues(&corpus.issues)?;
 
-    let stage = progress.stage_bar("fixing corpus", corpus_size_bytes(corpus));
+    let stage = progress.stage_bar(
+        format!("fixing corpus: {} text file(s)", corpus.files.len()),
+        corpus_size_bytes(corpus),
+    );
     let result = pool.install(|| repair_files(&mut writer, &corpus.files, &stage, cancellation));
     if let Err(error) = result {
         stage.finish("fixing corpus interrupted");
@@ -152,15 +155,27 @@ fn repair_files(
     stage: &StageProgress,
     cancellation: &CancellationToken,
 ) -> Result<(), RepairError> {
-    for file in files {
+    let total_files = files.len();
+    for (index, file) in files.iter().enumerate() {
         cancellation.check()?;
         writer.repair_file(file, stage, cancellation)?;
         stage.set_message(format!(
-            "fixing corpus: {} line(s), {} fixed, {} skipped",
-            writer.summary.lines_read, writer.summary.lines_fixed, writer.summary.lines_skipped
+            "fixing corpus: file {}/{}, {}, {} line(s), {} fixed, {} skipped",
+            index + 1,
+            total_files,
+            status_file_label(file),
+            writer.summary.lines_read,
+            writer.summary.lines_fixed,
+            writer.summary.lines_skipped
         ));
     }
     Ok(())
+}
+
+fn status_file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 struct RepairPaths {

@@ -128,7 +128,10 @@ pub fn balance_corpus(
     let paths = BalancePaths::from_config(config);
     paths.create_dirs()?;
 
-    let stage = progress.stage("balancing corpus");
+    let stage = progress.stage(format!(
+        "balancing corpus: {} repaired line(s)",
+        repair.lines_written
+    ));
     let summary = if config.balancing.enabled {
         assemble_balanced(config, repair, &paths)?
     } else {
