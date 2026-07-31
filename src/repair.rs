@@ -106,9 +106,10 @@ pub fn repair_corpus(
     let mut writer = RepairWriter::new(output, issues, config, corpus.root.clone(), &paths);
     writer.write_source_issues(&corpus.issues)?;
 
-    let stage = progress.stage("fixing corpus");
+    let stage = progress.stage_bar("fixing corpus", corpus.files.len() as u64);
     for file in &corpus.files {
         writer.repair_file(file)?;
+        stage.inc(1);
         stage.set_message(format!(
             "fixing corpus: {} line(s), {} fixed, {} skipped",
             writer.summary.lines_read, writer.summary.lines_fixed, writer.summary.lines_skipped

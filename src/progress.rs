@@ -26,6 +26,24 @@ impl ProgressReporter {
         bar.set_message(message);
         StageProgress { bar }
     }
+
+    pub fn stage_bar(&self, message: &'static str, total: u64) -> StageProgress {
+        if self.json_output {
+            eprintln!("{message}");
+            return StageProgress {
+                bar: ProgressBar::hidden(),
+            };
+        }
+
+        let bar = ProgressBar::new(total);
+        bar.set_style(
+            ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} {msg}")
+                .expect("bar progress template is static")
+                .progress_chars("=> "),
+        );
+        bar.set_message(message);
+        StageProgress { bar }
+    }
 }
 
 pub struct StageProgress {
@@ -37,7 +55,27 @@ impl StageProgress {
         self.bar.set_message(message.into());
     }
 
+    pub fn inc(&self, delta: u64) {
+        self.bar.inc(delta);
+    }
+
     pub fn finish(self, message: impl Into<String>) {
         self.bar.finish_with_message(message.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_bar_tracks_position() {
+        let progress = ProgressReporter::new(false);
+        let stage = progress.stage_bar("fixing corpus", 3);
+
+        assert_eq!(stage.bar.length(), Some(3));
+        stage.inc(1);
+        assert_eq!(stage.bar.position(), 1);
+        stage.finish("done");
     }
 }
