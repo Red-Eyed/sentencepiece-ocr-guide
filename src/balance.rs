@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unicode_script::{Script, UnicodeScript};
 
@@ -16,7 +16,7 @@ use crate::repair::{RepairSummary, ShardSummary};
 
 const IO_BUFFER_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BalanceSummary {
     pub training_files: Vec<PathBuf>,
     pub report: PathBuf,
@@ -25,7 +25,7 @@ pub struct BalanceSummary {
     pub buckets: Vec<BucketBalance>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BucketBalance {
     pub bucket: BucketKey,
     pub input_lines: u64,
@@ -34,7 +34,7 @@ pub struct BucketBalance {
     pub training_files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BucketKey {
     pub domain: Domain,
     pub script: String,
@@ -49,14 +49,14 @@ pub struct SourceHints {
     pub source_group: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Domain {
     Text,
     Math,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LengthBin {
     Short,

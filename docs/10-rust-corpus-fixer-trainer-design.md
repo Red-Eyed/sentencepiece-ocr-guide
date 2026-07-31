@@ -279,6 +279,11 @@ are not cut too aggressively. The result is written as several meaningful files 
 The program trains SentencePiece on all files in `work_dir/train_corpus/` and writes the model,
 vocabulary, trainer output, reports, and manifest under `work_dir/`.
 
+With `train --train-only`, the program loads the current config for SentencePiece parameters,
+loads `work_dir/reports/balance.json`, validates that every listed training corpus file still
+exists, and runs only this stage. This is the fast path for retuning tokenizer parameters after a
+successful repair and balance run.
+
 ## Output Checks
 
 After training, the program checks the model, vocabulary, and repaired corpus and writes the

@@ -77,6 +77,12 @@ RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" CFLAGS="${CFLAGS:-} -march=nativ
 Press Ctrl+C to stop a run. During SentencePiece training, `spm-ocr` also stops the Python
 trainer subprocess before exiting.
 
+If the corpus has already been fixed and balanced in `work_dir`, retrain only SentencePiece:
+
+```sh
+just train-only
+```
+
 ## Outputs
 
 - `work_dir/train_corpus/*.txt`: meaningful corpus parts used for training.

@@ -1,5 +1,11 @@
+cargo-run +args:
+    RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" CFLAGS="${CFLAGS:-} -march=native" cargo run --release -- {{args}}
+
 train config="cfg.json":
-    RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" CFLAGS="${CFLAGS:-} -march=native" cargo run --release -- train --config {{config}}
+    just cargo-run train --config {{config}}
+
+train-only config="cfg.json":
+    just cargo-run train --config {{config}} --train-only
 
 check:
     cargo fmt --all -- --check
