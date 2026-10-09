@@ -9,6 +9,7 @@ authors = [
     { name = "Vadym Stupakov", email = "vadim.stupakov@gmail.com" },
 ]
 dependencies = [
+    "pydantic>=2.7,<3",
     "sentencepiece>=0.2.2",
 ]
 
