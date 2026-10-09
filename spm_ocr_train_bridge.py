@@ -2,7 +2,7 @@
 
 Construct ``SentencePieceOptions`` for Python-only training. Its attribute docstrings
 are included in ``model_json_schema()`` alongside defaults and allowed values.
-The schema targets file-based training with the SentencePiece 0.2.2 wheel; corpus
+The schema targets file-based training with the configured SentencePiece Git build; corpus
 feasibility and file access remain SentencePiece's responsibility.
 """
 
@@ -85,6 +85,8 @@ class SentencePieceOptions(BaseModel):
         default=0.9998, ge=0.98, le=1, allow_inf_nan=False
     )
     """Fraction of corpus character occurrences covered by retained alphabet characters."""
+    auto_character_coverage: bool = False
+    """Automatically allocate BPE vocabulary slots between characters and subwords; requires byte fallback and empty required_chars."""
     input_sentence_size: int = Field(default=20000000, ge=0, le=18446744073709551615)
     """Maximum sampled input lines; zero loads all lines, otherwise the value must exceed 100."""
     shuffle_input_sentence: bool = True
@@ -201,6 +203,23 @@ class SentencePieceOptions(BaseModel):
             )
         if not self.escape_whitespaces:
             raise ValueError("SentencePiece training requires escape_whitespaces=True")
+        return self
+
+    @model_validator(mode="after")
+    def validate_auto_coverage(self) -> Self:
+        """Check auto coverage against the capabilities of the installed Python trainer."""
+        if not self.auto_character_coverage:
+            return self
+        if self.model_type != "bpe":
+            raise ValueError(
+                "Python auto coverage requires bpe; unigram requires the CLI-only use_sparse_pruning flag"
+            )
+        if not self.byte_fallback:
+            raise ValueError("auto_character_coverage requires byte_fallback=True")
+        if self.required_chars:
+            raise ValueError(
+                "auto_character_coverage cannot be combined with required_chars"
+            )
         return self
 
     @model_validator(mode="after")
@@ -349,6 +368,7 @@ def _train(options: SentencePieceOptions | Mapping[str, object]) -> None:
         differential_privacy_noise_level=options.differential_privacy_noise_level,
         differential_privacy_clipping_threshold=options.differential_privacy_clipping_threshold,
         character_coverage=options.character_coverage,
+        auto_character_coverage=options.auto_character_coverage,
         input_sentence_size=options.input_sentence_size,
         shuffle_input_sentence=options.shuffle_input_sentence,
         seed_sentencepiece_size=options.seed_sentencepiece_size,
