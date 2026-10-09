@@ -83,6 +83,15 @@ If the corpus has already been fixed and balanced in `work_dir`, retrain only Se
 just train-only
 ```
 
+The Python trainer's explicit named options and fallback defaults are in
+[`spm_ocr_train_bridge.py`](spm_ocr_train_bridge.py), in `_train`. Request values override
+those defaults, so the Rust OCR presets still select their configured vocabulary sizes.
+For a Python-only experiment, call `_train` with `input` and `model_prefix`, or replay an
+edited `trainer_request.json` with `uv run python -m spm_ocr_train_bridge <request.json>`.
+The Python fallback vocabulary size is 8192; other fallback choices use OCR settings
+where applicable and SentencePiece 0.2.2 defaults otherwise.
+`auto_character_coverage` is not supported by the currently available 0.2.2 wheel.
+
 ## Outputs
 
 - `work_dir/train_corpus/*.txt`: meaningful corpus parts used for training.
